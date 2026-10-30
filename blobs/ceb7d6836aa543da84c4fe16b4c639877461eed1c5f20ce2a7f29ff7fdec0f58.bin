@@ -1,0 +1,54 @@
+'use strict';
+const AppUpdates=(()=>{
+ let snapshot={state:'current',nativeVersion:'',supported:false},busy=false,started=false,lastCheck=0,notified=0;
+ const call=operation=>Platform.updatesCall(operation);
+ function message(){
+  if(busy)return snapshot.state==='downloading'?'Descargando solo los archivos que cambiaron…':'Buscando actualizaciones…';
+  return {current:'La aplicación está al día.',ready:'Actualización lista. Puedes aplicarla ahora.',native_required:'Esta actualización incluye cambios que requieren una nueva versión completa.',recovered:'Se restauró la versión anterior porque la última actualización no terminó de iniciar.',disabled:'Las actualizaciones se comprueban en la aplicación instalada.',error:'No se pudo buscar la actualización. Revisa tu conexión y vuelve a intentar.'}[snapshot.state]||'La actualización está disponible.';
+ }
+ function refresh(){
+  const text=document.getElementById('updateStatus'),version=document.getElementById('updateVersion'),check=document.getElementById('updateCheck'),apply=document.getElementById('updateApply');
+  if(text)text.textContent=message();if(version)version.textContent=snapshot.nativeVersion?'Versión '+snapshot.nativeVersion:'';
+  if(check){check.disabled=busy||!snapshot.supported;check.textContent=busy?'Buscando…':'Buscar actualizaciones';}
+  if(apply){apply.hidden=!['ready','native_required'].includes(snapshot.state);apply.disabled=busy;apply.textContent=snapshot.state==='native_required'?'Actualizar versión completa':'Actualizar ahora';}
+ }
+ function notify(){
+  if(!['ready','native_required'].includes(snapshot.state)||notified===snapshot.sequence||document.hidden)return;
+  const player=document.getElementById('playerLayer');if(player&&!player.classList.contains('hidden'))return;
+  notified=snapshot.sequence;
+  App.toastAction(snapshot.state==='ready'?'Hay una actualización lista.':'Hay una nueva versión de la aplicación.','Ver',()=>App.go('settings'));
+ }
+ async function check(manual=false){
+  if(busy||typeof Platform.updatesCall!=='function')return;
+  busy=true;refresh();
+  try{
+   snapshot=await call('check');lastCheck=Date.now();
+   if(snapshot.state==='available'){snapshot.state='downloading';refresh();snapshot=await call('download');}
+   if(manual&&snapshot.state==='current')App.toast('La aplicación está al día.');
+  }catch{snapshot={...snapshot,state:'error'};if(manual)App.toast('No se pudo buscar la actualización. Vuelve a intentar.');}
+  finally{busy=false;refresh();notify();}
+ }
+ async function apply(){
+  if(busy)return;
+  const player=document.getElementById('playerLayer');
+  if(document.hidden||(player&&!player.classList.contains('hidden'))){App.toast('Cierra la reproducción antes de aplicar la actualización.');return;}
+  busy=true;refresh();
+  try{
+   if(typeof AndroidNative!=='undefined')await AndroidNative.flush();
+   if(snapshot.state==='native_required'){await call('native');return;}
+   await call('apply');
+  }catch{App.toast('No se pudo aplicar la actualización. Tu versión actual se conserva.');}
+  finally{busy=false;refresh();}
+ }
+ function html(){return '<div class="set-card"><h2>Actualizaciones</h2><p id="updateVersion"></p><p id="updateStatus" role="status" aria-live="polite">Consultando la versión instalada…</p><p class="hint">Las mejoras habituales descargan solo los archivos modificados. Tus favoritos y tu progreso se conservan.</p><div class="m-actions set-actions-start"><button type="button" class="btn" id="updateCheck">Buscar actualizaciones</button><button type="button" class="btn primary" id="updateApply" hidden>Actualizar ahora</button></div></div>';}
+ function bind(){const checkButton=document.getElementById('updateCheck'),applyButton=document.getElementById('updateApply');if(checkButton)checkButton.onclick=()=>check(true);if(applyButton)applyButton.onclick=apply;refresh();}
+ async function start(){
+  if(started||typeof Platform.updatesCall!=='function')return;started=true;
+  try{snapshot=await call('status');if(snapshot.supported)snapshot=await call('confirm');refresh();}catch{return;}
+  if(!snapshot.supported)return;
+  setTimeout(()=>check(),3500);
+  setInterval(()=>{if(!document.hidden&&Date.now()-lastCheck>6*60*60*1000)check();},30*60*1000);
+  document.addEventListener('visibilitychange',()=>{if(!document.hidden){notify();if(Date.now()-lastCheck>6*60*60*1000)check();}});
+ }
+ return {html,bind,start,check};
+})();

@@ -1,0 +1,40 @@
+'use strict';
+// A single bounded queue per application. Off-screen cards do not schedule requests.
+const VisibleRatings=(()=>{
+ function create({load,remember,paint,read=()=>null,observe,connected=card=>card.isConnected!==false}){
+  let observer=null,generation=0,running=0,waiting=new Map();const active=new Map();
+  function pump(){
+   while(running<2&&waiting.size){
+    const [key,job]=waiting.entries().next().value;waiting.delete(key);
+    if(!job.cards.some(connected))continue;
+    running++;active.set(key,job);
+    Promise.resolve().then(()=>load(job.item)).then(score=>{
+     if(score===null||score===undefined)return;
+     remember(job.item,score);
+     for(const card of job.cards)if(connected(card))paint(card,score);
+    }).catch(()=>{}).finally(()=>{running--;active.delete(key);pump();});
+   }
+  }
+  function enqueue(card){
+   if(!connected(card))return;
+   const item={type:card.dataset.type,id:card.dataset.id},key=item.type+':'+item.id;
+   const cached=read(item);if(cached){paint(card,cached);return;}
+   if(card.querySelector('.rating'))return;
+   const existing=active.get(key)||waiting.get(key);
+   if(existing){if(!existing.cards.includes(card))existing.cards.push(card);return;}
+   waiting.set(key,{item,cards:[card]});pump();
+  }
+  function start(cards,root){
+   generation++;const current=generation;observer?.disconnect();waiting.clear();
+   observer=observe?observe(entries=>{if(current!==generation)return;for(const entry of entries)if(entry.isIntersecting){observer?.unobserve(entry.target);enqueue(entry.target);}},root):null;
+   for(const card of cards){
+    const cached=read({type:card.dataset.type,id:card.dataset.id});
+    if(cached)paint(card,cached);
+    else if(!card.querySelector('.rating')){if(observer)observer.observe(card);else if(card.getBoundingClientRect().top<((root?.clientHeight)||720)+160)enqueue(card);}
+   }
+  }
+  return {start,cancel(){generation++;observer?.disconnect();waiting.clear();},stats:()=>({running,pending:waiting.size})};
+ }
+ return {create};
+})();
+if(typeof module!=='undefined')module.exports=VisibleRatings;

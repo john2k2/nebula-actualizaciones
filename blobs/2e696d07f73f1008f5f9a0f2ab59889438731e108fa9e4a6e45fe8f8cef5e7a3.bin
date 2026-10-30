@@ -1,0 +1,41 @@
+{
+  "movies": [
+    {
+      "id": 603,
+      "nameFile": "The Matrix (Ejemplo)",
+      "generos": [28, 878],
+      "othersNames": "Matrix",
+      "resolutions": "720p|1080p",
+      "type": 1,
+      "urlImage": "https://image.tmdb.org/t/p/w500/f89U3ADr1ovH40r1yRrrpToT3RQ.jpg",
+      "urls": [],
+      "vote": 8.2,
+      "date": "1999"
+    }
+  ],
+  "series": [
+    {
+      "id": 1396,
+      "nameFile": "Breaking Bad (Ejemplo)",
+      "generos": [18, 80],
+      "othersNames": "BB",
+      "resolutions": "1080p",
+      "type": 2,
+      "urlImage": "https://image.tmdb.org/t/p/w500/ggFHVNu6YYI5L9pCfOacjizRGt.jpg",
+      "urls": [],
+      "vote": 8.9,
+      "date": "2008",
+      "episodes": [
+        {
+          "season": 1,
+          "episode": 1,
+          "name": "Pilot (Ejemplo)",
+          "overview": "Episodio de ejemplo del formato extendido del clon.",
+          "stillPath": "",
+          "resolutions": ["1080p"],
+          "urls": []
+        }
+      ]
+    }
+  ]
+}

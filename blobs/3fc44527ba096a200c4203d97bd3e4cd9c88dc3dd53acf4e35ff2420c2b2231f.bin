@@ -1,0 +1,52 @@
+"use strict";
+var MoviePlusUI = (() => {
+  var __defProp = Object.defineProperty;
+  var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+  var __getOwnPropNames = Object.getOwnPropertyNames;
+  var __hasOwnProp = Object.prototype.hasOwnProperty;
+  var __export = (target, all) => {
+    for (var name in all)
+      __defProp(target, name, { get: all[name], enumerable: true });
+  };
+  var __copyProps = (to, from, except, desc) => {
+    if (from && typeof from === "object" || typeof from === "function") {
+      for (let key of __getOwnPropNames(from))
+        if (!__hasOwnProp.call(to, key) && key !== except)
+          __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+    }
+    return to;
+  };
+  var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
+
+  // packages/ui/src/presentation.ts
+  var presentation_exports = {};
+  __export(presentation_exports, {
+    emptyMessage: () => emptyMessage,
+    escapeHtml: () => escapeHtml,
+    ratingChip: () => ratingChip,
+    ratingLabel: () => ratingLabel,
+    ratingValue: () => ratingValue
+  });
+  var escapes = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+  function escapeHtml(value) {
+    return String(value ?? "").replace(/[&<>"']/g, (char) => escapes[char]);
+  }
+  function ratingValue(...values) {
+    for (const value of values) {
+      const score = Number(value);
+      if (Number.isFinite(score) && score > 0 && score <= 10) return score;
+    }
+    return null;
+  }
+  function ratingLabel(value) {
+    const score = ratingValue(value);
+    return score === null ? "Sin puntaje" : "\u2605 " + score.toFixed(1) + "/10";
+  }
+  function ratingChip(value) {
+    return `<span class="chip${ratingValue(value) === null ? "" : " gold"}">${ratingLabel(value)}</span>`;
+  }
+  function emptyMessage(title, description = "") {
+    return `<div class="empty-state" role="status"><strong>${escapeHtml(title)}</strong>${description ? "<p>" + escapeHtml(description) + "</p>" : ""}</div>`;
+  }
+  return __toCommonJS(presentation_exports);
+})();

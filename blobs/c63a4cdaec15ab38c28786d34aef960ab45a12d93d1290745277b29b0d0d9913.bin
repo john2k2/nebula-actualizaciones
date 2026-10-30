@@ -1,0 +1,3 @@
+'use strict';
+const SourceCatalog=typeof module!=='undefined'?require('../generated/core/src/catalog-service.js').SourceCatalog:MoviePlusCore.SourceCatalog;
+if(typeof module!=='undefined')module.exports=SourceCatalog;

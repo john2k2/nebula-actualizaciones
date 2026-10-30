@@ -1,0 +1,39 @@
+'use strict';
+
+// Format observed in ActivityVideo.qualitys (REA): label, size, link.
+const CatalogSources = (() => {
+  const identity=typeof MediaIdentity!=='undefined'?MediaIdentity:require('./core/media-identity.js');
+  const availability=typeof SourceAvailability!=='undefined'?SourceAvailability:require('./core/source-availability.js');
+  const catalogService=typeof SourceCatalog!=='undefined'?SourceCatalog:require('./core/catalog-service.js');
+  function parse(urls, resolutions = '') {
+    const labels = Array.isArray(resolutions) ? resolutions : String(resolutions).split(/[|,;/]+/).map(s => s.trim()).filter(Boolean);
+    return (Array.isArray(urls) ? urls : []).map((entry, i) => {
+      const object = entry && typeof entry === 'object' ? entry : {};
+      const parts = typeof entry === 'string' ? entry.split(',_,') : [];
+      const encoded = parts.length >= 3;
+      const link = String(encoded ? parts.slice(2).join(',_,') : (typeof entry === 'string' ? entry : object.url || object.link || '')).trim();
+      let url = '';
+      try {
+        const parsed = new URL(link);
+        if (['http:', 'https:', 'movieplus-source:', 'nebula:'].includes(parsed.protocol)) url = parsed.href;
+      } catch {}
+      return {
+        name: String(encoded ? parts[0] : object.name || object.quality || labels[i] || `Fuente ${i + 1}`),
+        size: String(encoded ? parts[1] : object.size || ''),
+        url,
+        unavailableReason: url ? '' : 'Enlace cifrado o inválido: pendiente de resolver',
+      };
+    });
+  }
+  const topQualities = catalogService.topQualities;
+  function availabilityLabel(item, inCatalog = false) {
+    if (item.kind === 'nebula') return 'Nébula · Ver fuentes';
+    if (item.type === 'tv') return inCatalog || item.kind === 'catalog' ? 'Fuentes por capítulo' : 'Consultar capítulos';
+    return item.source || item.kind === 'jellyfin' ? 'Original' : 'Consultar fuentes';
+  }
+  function isTestCatalog(url) {
+    try {const parsed=new URL(url);return parsed.protocol==='http:' && ['127.0.0.1','localhost'].includes(parsed.hostname) && parsed.port==='18765' && parsed.pathname==='/catalog.json';}catch{return false;}
+  }
+  return { parse, topQualities, availabilityLabel, identity, availability, isTestCatalog, catalogService };
+})();
+if (typeof module !== 'undefined') module.exports = CatalogSources;

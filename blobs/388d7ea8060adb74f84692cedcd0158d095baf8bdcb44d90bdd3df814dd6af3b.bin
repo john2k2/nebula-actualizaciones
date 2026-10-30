@@ -1,0 +1,3 @@
+'use strict';
+const MediaIdentity=typeof module!=='undefined'?require('../generated/core/src/media-identity.js').MediaIdentity:MoviePlusCore.MediaIdentity;
+if(typeof module!=='undefined')module.exports=MediaIdentity;

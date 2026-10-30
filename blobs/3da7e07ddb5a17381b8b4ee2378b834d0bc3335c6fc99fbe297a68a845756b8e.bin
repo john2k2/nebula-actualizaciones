@@ -1,0 +1,34 @@
+'use strict';
+const Store = MoviePlusCore.createUserStore(Platform.storage, {
+  list: () => Platform.historyList(),
+  save: list => Platform.historySave(list),
+  mutate: Platform.historyMutate ? change => Platform.historyMutate(change) : undefined,
+}, (()=>{
+  const defaults = {
+    settings: {
+      tmdbToken: '',              // configurar una clave propia en Ajustes
+      language: 'es-MX',
+      catalogUrls: [],            // catálogos externos en formato MoviePlus (opcional)
+      builtinCatalog: true,
+      autoPlayNext: true,
+      defaultSpeed: 1,
+      subFontSize: 16,
+      subColor: '#ffffff',
+      subBg: 'rgba(0,0,0,0.55)',
+      externalPlayer: '',         // ruta de VLC u otro reproductor
+      preferExternal: false,
+      downloadDir: '',
+      hlsPreferredBandwidth: 0,   // 0 = máxima
+      jellyfinUrl: '',            // URL de tu servidor Jellyfin (opcional)
+      jellyfinKey: '',            // API key de Jellyfin (Panel → API Keys)
+    },
+    favorites: {},      // key -> {type, tmdbId, title, poster, addedAt}
+    history: {},        // key -> visto completo
+    resume: {},         // key -> {position, duration, updatedAt, title, poster, type, season, episode}
+    skipTimes: {},      // key -> {start, end} salto de intro personalizado
+    watchedEpisodes: {},// key -> true
+    searchHistory: [],  // últimas búsquedas
+    seenItems: {},      // key -> {at} para icono visto
+  };
+return defaults;
+})(), Platform.progressWrite ? payload => { try { Promise.resolve(Platform.progressWrite(payload)).catch(() => {}); } catch {} } : null);

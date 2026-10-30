@@ -1,0 +1,18 @@
+'use strict';
+// The sole renderer entry point that knows Electron's preload and browser storage.
+const Platform = MoviePlusWindows.createWindowsPlatform(window.bridge, {
+  read: key => {
+    if(key!=='movp_clone_store_v1')throw Error('Clave de perfil inválida');
+    return window.bridge.profileRead(localStorage.getItem(key));
+  },
+  write: (key, value) => {
+    if(key!=='movp_clone_store_v1')throw Error('Clave de perfil inválida');
+    window.bridge.profileWrite(value);
+  },
+});
+window.addEventListener('error',event=>{
+  if(String(event.message).includes('[PROFILE]')){
+    const show=()=>{document.getElementById('content').textContent='No se pudo abrir o guardar el perfil. Tus archivos anteriores se conservaron. Cierra MoviePlus y revisa el espacio disponible antes de reintentar.';};
+    if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',show);else show();
+  }
+});

@@ -1,0 +1,19 @@
+'use strict';
+const PlaybackTracks = (() => {
+  const names = { spa: 'Español', es: 'Español', eng: 'Inglés', en: 'Inglés', kor: 'Coreano', ko: 'Coreano', jpn: 'Japonés', ja: 'Japonés', por: 'Portugués', pt: 'Portugués', fra: 'Francés', fre: 'Francés', fr: 'Francés', ita: 'Italiano', it: 'Italiano', deu: 'Alemán', ger: 'Alemán', de: 'Alemán', und: '' };
+  function language(code) { return names[String(code || '').toLowerCase()] || code || ''; }
+  function key(code) { const value = String(code || '').toLowerCase().split('-')[0]; return ({ spa: 'es', eng: 'en', kor: 'ko', jpn: 'ja', por: 'pt', fra: 'fr', fre: 'fr', ita: 'it', deu: 'de', ger: 'de' })[value] || value; }
+  const label=(name,code,index)=>name&&!/^(?:soundhandler|audiohandler|audio|default|und)$/i.test(name)?name:language(code)||`Pista ${index+1}`;
+  function audio(video, hls) {
+    if (hls?.audioTracks?.length) return hls.audioTracks.map((track, index) => ({ index, name: track.name || language(track.lang) || `Pista ${index + 1}`, language: track.lang || '', selected: hls.audioTrack === index }));
+    return Array.from(video.audioTracks || []).map((track, index) => ({ index, name: label(track.label,track.language,index), language: track.language || '', selected: track.enabled }));
+  }
+  function select(video, hls, index) {
+    const tracks = audio(video, hls);
+    if (!tracks.some(track => track.index === index)) throw new Error('Pista de audio no disponible');
+    if (hls?.audioTracks?.length) hls.audioTrack = index;
+    else Array.from(video.audioTracks || []).forEach((track, i) => { track.enabled = i === index; });
+  }
+  return { language, key, audio, select };
+})();
+if (typeof module !== 'undefined') module.exports = PlaybackTracks;
