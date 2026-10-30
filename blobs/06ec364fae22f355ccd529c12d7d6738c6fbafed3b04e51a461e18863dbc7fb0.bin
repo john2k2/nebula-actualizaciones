@@ -1,0 +1,237 @@
+"use strict";
+var MoviePlusWindows = (() => {
+  var __defProp = Object.defineProperty;
+  var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+  var __getOwnPropNames = Object.getOwnPropertyNames;
+  var __hasOwnProp = Object.prototype.hasOwnProperty;
+  var __export = (target, all) => {
+    for (var name in all)
+      __defProp(target, name, { get: all[name], enumerable: true });
+  };
+  var __copyProps = (to, from, except, desc) => {
+    if (from && typeof from === "object" || typeof from === "function") {
+      for (let key of __getOwnPropNames(from))
+        if (!__hasOwnProp.call(to, key) && key !== except)
+          __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+    }
+    return to;
+  };
+  var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
+
+  // packages/windows/src/platform.ts
+  var platform_exports = {};
+  __export(platform_exports, {
+    createWindowsPlatform: () => createWindowsPlatform
+  });
+
+  // packages/windows/src/ipc-schema.ts
+  var channels = {
+    profileRead: "profile:read",
+    profileWrite: "profile:write",
+    profileExport: "profile:export",
+    profileImport: "profile:import",
+    historyMutate: "downloads-history:mutate",
+    runtimeInfo: "runtime:info",
+    updatesCall: "updates:call",
+    registerSources: "sources:register",
+    nebulaCall: "nebula:call",
+    downloadStart: "download:start",
+    downloadCancel: "download:cancel",
+    downloadRetry: "download:retry",
+    downloadRemove: "download:removeEntry",
+    downloadActive: "download:active",
+    historyList: "downloads-history:list",
+    historySave: "downloads-history:save",
+    pickDirectory: "dialog:pickDirectory",
+    pickFile: "dialog:pickFile",
+    fileStat: "file:stat",
+    fileDelete: "file:delete",
+    fileReveal: "file:reveal",
+    fileOpenExternal: "file:openExternal",
+    openExternalPlayer: "player:openExternal",
+    appPaths: "app:paths",
+    clearCache: "cache:clear",
+    exitFullscreen: "window:exitFullscreen",
+    toggleFullscreen: "window:toggleFullscreen",
+    minimize: "window:minimize",
+    maximizeToggle: "window:maximize",
+    closeWindow: "window:close",
+    isMaximized: "window:isMaximized",
+    openUrl: "shell:openUrl",
+    clipboardWrite: "clipboard:write",
+    netFetch: "net:fetch",
+    catalogFetch: "catalog:fetch",
+    defaultCatalog: "catalog:default",
+    resolveVideo: "player:resolve",
+    releaseVideo: "player:release",
+    seriesEpisodes: "series:episodes",
+    castDiscover: "cast:discover",
+    castStart: "cast:start",
+    castCommand: "cast:command",
+    castStop: "cast:stop",
+    nativeProbe: "native:probe",
+    nativePrepare: "native:prepare",
+    nativeStop: "native:stop"
+  };
+  var known = new Set(Object.values(channels));
+  function record(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function text(value, max = 16e3) {
+    return typeof value === "string" && value.length > 0 && value.length <= max;
+  }
+  function number(value) {
+    return typeof value === "number" && Number.isFinite(value) && value >= 0;
+  }
+  function strings(value) {
+    return Array.isArray(value) && value.length <= 500 && value.every((item) => typeof item === "string" && item.length <= 16e3);
+  }
+  function list(value) {
+    return Array.isArray(value) && value.length <= 1e4;
+  }
+  function source(value) {
+    return record(value) && text(value.url) && text(value.name, 500) && (value.size === void 0 || typeof value.size === "string");
+  }
+  function objectList(value) {
+    return list(value) && value.every(record);
+  }
+  var noArgs = /* @__PURE__ */ new Set(["runtime:info", "download:active", "downloads-history:list", "dialog:pickDirectory", "app:paths", "cache:clear", "window:exitFullscreen", "window:toggleFullscreen", "window:minimize", "window:maximize", "window:close", "window:isMaximized", "catalog:default", "cast:discover", "cast:stop", "native:stop"]);
+  function validateRequest(channel, args) {
+    let valid = known.has(channel);
+    if (noArgs.has(channel)) valid = valid && args.length === 0;
+    else switch (channel) {
+      case "updates:call":
+        valid = args.length === 1 && ["status", "check", "download", "apply", "confirm", "native"].includes(String(args[0]));
+        break;
+      case "profile:export":
+        valid = args.length === 0;
+        break;
+      case "profile:import":
+        valid = args.length === 1 && typeof args[0] === "string" && args[0].length <= 32 * 1024 * 1024;
+        break;
+      case "downloads-history:mutate":
+        valid = args.length === 1 && record(args[0]) && ["patch", "upsert", "remove"].includes(String(args[0].kind)) && text(args[0].id, 1e3) && (args[0].kind === "remove" || record(args[0].value));
+        break;
+      case "profile:read":
+        valid = args.length <= 1 && (args[0] === void 0 || args[0] === null || typeof args[0] === "string" && args[0].length <= 16 * 1024 * 1024);
+        break;
+      case "profile:write":
+        valid = args.length === 1 && typeof args[0] === "string" && args[0].length <= 16 * 1024 * 1024;
+        break;
+      case "sources:register":
+        valid = args.length === 1 && Array.isArray(args[0]) && args[0].length <= 500 && args[0].every(source);
+        break;
+      case "nebula:call": {
+        const [command, params] = args;
+        valid = args.length === 2 && typeof command === "string" && ["runtime.status", "runtime.configure", "session.reconnect", "categories", "search", "catalog", "details", "playback.options", "playback", "playback.stop"].includes(command) && record(params);
+        if (valid && record(params)) valid = command === "runtime.configure" ? Object.keys(params).length === 1 && text(params.root) : Object.entries(params).every(([key, value]) => ["kind", "id", "query", "page", "category", "quality", "audio_language", "session_id"].includes(key) && (typeof value === "string" || number(value)));
+        break;
+      }
+      case "download:start":
+      case "cast:start": {
+        const value = args[0];
+        valid = args.length === 1 && record(value) && text(value.url);
+        if (valid && record(value)) {
+          for (const field of channel === "download:start" ? ["filename", "dir"] : ["deviceId", "address", "title", "poster", "audioLanguage"]) if (value[field] !== void 0 && typeof value[field] !== "string") valid = false;
+        }
+        if (valid && record(value)) {
+          for (const field of ["currentTime", "duration", "audio"]) if (value[field] !== void 0 && !number(value[field])) valid = false;
+        }
+        break;
+      }
+      case "downloads-history:save":
+        valid = args.length === 1 && objectList(args[0]);
+        break;
+      case "dialog:pickFile":
+        valid = args.length <= 1 && (args[0] === void 0 || record(args[0]) && (args[0].filters === void 0 || Array.isArray(args[0].filters) && args[0].filters.every((filter) => record(filter) && text(filter.name, 100) && strings(filter.extensions))));
+        break;
+      case "player:openExternal":
+        valid = args.length === 1 && record(args[0]) && text(args[0].exePath) && strings(args[0].args);
+        break;
+      case "net:fetch":
+        valid = args.length <= 2 && text(args[0]) && (args[1] === void 0 || record(args[1]) && (args[1].headers === void 0 || record(args[1].headers) && Object.values(args[1].headers).every((value) => typeof value === "string")));
+        break;
+      case "native:prepare":
+        valid = args.length === 3 && text(args[0]) && number(args[1]) && Number.isInteger(args[1]) && number(args[2]);
+        break;
+      case "cast:command":
+        valid = args.length <= 2 && typeof args[0] === "string" && ["play", "pause", "seek", "volume", "mute", "audio", "stop"].includes(args[0]) && (["play", "pause", "stop"].includes(args[0]) || args[0] === "mute" && typeof args[1] === "boolean" || number(args[1]));
+        break;
+      case "series:episodes":
+        valid = args.length === 1 && (text(args[0], 500) || number(args[0]));
+        break;
+      case "player:release":
+        valid = args.length <= 1 && (args[0] === void 0 || text(args[0], 500));
+        break;
+      case "clipboard:write":
+        valid = args.length === 1 && typeof args[0] === "string" && args[0].length <= 1e6;
+        break;
+      default:
+        valid = valid && args.length === 1 && text(args[0]);
+    }
+    if (!valid) throw Error("Solicitud IPC inv\xE1lida: " + channel);
+  }
+
+  // packages/windows/src/platform.ts
+  function createWindowsPlatform(bridge, storage) {
+    const methods = {};
+    for (const [method, channel] of Object.entries(channels)) {
+      const operation = bridge[method];
+      if (typeof operation !== "function") continue;
+      methods[method] = (...args) => {
+        validateRequest(channel, method === "openExternalPlayer" ? [{ exePath: args[0], args: args[1] }] : args);
+        return operation(...args);
+      };
+    }
+    for (const event of ["onWindowState", "onDownloadProgress", "onCastStatus"]) {
+      const subscribe = bridge[event];
+      if (typeof subscribe === "function") methods[event] = (...args) => subscribe(...args);
+    }
+    const call = async (name, ...args) => {
+      if (!methods[name]) throw Error("La plataforma no admite " + name);
+      return methods[name](...args);
+    };
+    const ports = {
+      storage,
+      playback: {
+        async resolve(reference) {
+          const value = await call("resolveVideo", reference);
+          if (!record(value) || value.ok !== true) throw Error(record(value) ? String(value.error) : "Respuesta de reproducci\xF3n inv\xE1lida");
+          if (typeof value.url !== "string" || typeof value.leaseId !== "string") throw Error("Ticket de reproducci\xF3n inv\xE1lido");
+          return { url: value.url, leaseId: value.leaseId };
+        },
+        async release(id) {
+          await call("releaseVideo", id);
+        }
+      },
+      files: { async pickVideo() {
+        const file = await call("pickFile", { filters: [{ name: "Video", extensions: ["mp4", "mkv", "webm", "ts"] }] });
+        return typeof file === "string" ? file : null;
+      }, async stat(path) {
+        const value = await call("fileStat", path);
+        if (!record(value) || typeof value.exists !== "boolean") throw Error("Archivo inv\xE1lido");
+        return { exists: value.exists, ...typeof value.size === "number" ? { size: value.size } : {} };
+      } },
+      cast: {
+        async discover() {
+          const value = await call("castDiscover");
+          if (!record(value) || !Array.isArray(value.devices)) throw Error("No se pudieron buscar receptores");
+          return value.devices;
+        },
+        async start(request) {
+          const value = await call("castStart", { url: request.reference, deviceId: request.deviceId, title: request.title, currentTime: request.position, audioLanguage: request.audioLanguage });
+          if (!record(value) || value.ok !== true) throw Error("No se pudo iniciar Cast");
+        },
+        async command(action, value) {
+          const result = await call("castCommand", action, value);
+          if (!record(result) || result.ok !== true) throw Error("No se pudo controlar Cast");
+        },
+        async stop() {
+          await call("castStop");
+        }
+      }
+    };
+    return Object.freeze({ ...methods, storage, ports });
+  }
+  return __toCommonJS(platform_exports);
+})();
