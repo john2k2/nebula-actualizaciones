@@ -1,0 +1,188 @@
+/* Google TV: lectura a distancia, foco explícito y márgenes de pantalla. */
+body.platform-tv {
+  --tv-bg: #08090c;
+  --tv-panel: #15151b;
+  --tv-text: #f7f4f5;
+  --tv-secondary: #c7c2c8;
+  --tv-focus: #ffffff;
+  --accent: #d80e24;
+  --accent-text: #ff6978;
+  --muted: var(--tv-secondary);
+  --bg: var(--tv-bg);
+  background: var(--tv-bg);
+  color: var(--tv-text);
+  font-size: 16px;
+  line-height: 1.5;
+  caret-color: #ff6978;
+}
+body.platform-tv ::selection { background: #a70d20; color: white; }
+body.platform-tv *, body.platform-tv *::before, body.platform-tv *::after { animation: none !important; transition: none !important; }
+body.platform-tv #titlebar { position: fixed; top: 0; left: 0; right: 0; height: 78px; padding: 12px 32px; background: var(--tv-bg); border-bottom: 1px solid #25242b; z-index: 100; }
+body.platform-tv #titlebar .tb-brand { display: flex !important; align-items: center; gap: 10px; color: var(--tv-text); font-size: 23px; font-weight: 750; }
+body.platform-tv .tb-logo { width: 30px; height: 30px; }
+body.platform-tv #titlebar .tb-title,
+body.platform-tv #tbMenu,
+body.platform-tv #tbFilterBtn,
+body.platform-tv #tbSearchClear,
+body.platform-tv #sidebar .drawer-header,
+body.platform-tv #sidebar .sidebar-foot,
+body.platform-tv #sidebar .nav-label,
+body.platform-tv #sidebar .nav-hover-pill,
+body.platform-tv #sidebar > .sidebar-scroll > [data-view="browse"],
+body.platform-tv #sidebar > .sidebar-scroll > [data-view="search"] { display: none !important; }
+body.platform-tv #titlebar .toolbar-back { margin-right: 8px; }
+body.platform-tv #titlebar .toolbar-back:disabled { display: none !important; }
+body.platform-tv #titlebar .tb-quick { margin-left: auto; gap: 8px; }
+body.platform-tv #titlebar .tb-icon-btn,
+body.platform-tv #titlebar .toolbar-back { width: 44px; height: 44px; border-radius: 10px; }
+body.platform-tv #sidebar {
+  position: fixed; top: 15px; left: 218px; right: 164px; z-index: 110;
+  display: flex; width: auto; min-height: 48px; max-height: none; padding: 0;
+  border: 0; background: transparent; box-shadow: none; backdrop-filter: none;
+  opacity: 1; pointer-events: auto; transform: none; overflow: visible;
+}
+body.platform-tv #sidebar .sidebar-scroll { display: flex; flex-flow: row nowrap; align-items: center; justify-content: center; gap: 10px; overflow: visible; }
+body.platform-tv #sidebar .nav-item,
+body.platform-tv #sidebar .nav-trigger { width: auto; min-height: 44px; padding: 9px 13px; font-size: 16px; font-weight: 650; border: 0; border-radius: 8px; color: var(--tv-secondary); background: transparent !important; transition: none; }
+body.platform-tv #sidebar .nav-item.active { background: #301017 !important; color: white; }
+body.platform-tv #sidebar .nav-group[open] .nav-trigger { color: white; }
+body.platform-tv #sidebar .nav-panel { position: absolute; top: 56px; left: 0; min-width: 250px; display: flex; flex-direction: column; gap: 6px; padding: 12px; background: #1c1b22; border: 0; border-radius: 12px; box-shadow: 0 16px 36px #00000099; overflow: visible; }
+body.platform-tv #sidebar .nav-panel button { width: 100%; min-height: 46px; padding: 10px 12px; font-size: 16px; color: var(--tv-text); }
+body.platform-tv #sidebar .nav-group:not([open]) > .nav-panel { display: none !important; }
+body.platform-tv #shell { position: absolute; top: 78px; left: 0; right: 0; bottom: 0; display: block; height: auto; margin: 0; padding: 0; }
+body.platform-tv #content { width: 100%; height: 100%; margin: 0; padding: 16px 32px 52px; overflow-x: hidden; overflow-y: auto; scroll-padding: 20px 12px 40px; scrollbar-color: #716973 var(--tv-bg); }
+body.platform-tv .view { max-width: 1600px; margin-inline: auto; padding: 0; }
+body.platform-tv .home-heading,
+body.platform-tv .home-filters,
+body.platform-tv .feature-kicker { display: none !important; }
+body.platform-tv .feature-spotlight { min-height: 220px; margin: 0 0 22px; border: 0; border-radius: 12px; overflow: hidden; background: var(--tv-panel); }
+body.platform-tv .feature-art { object-fit: cover; object-position: 78% 35%; opacity: .8; }
+body.platform-tv .feature-shade { background: linear-gradient(90deg, #101014 0%, #101014ed 32%, #10101470 68%, #10101420 100%); }
+body.platform-tv .feature-copy { max-width: 70%; padding: 22px 26px; }
+body.platform-tv .feature-copy h2 { max-width: 22ch; margin: 0 0 12px; font-family: inherit; font-size: 32px !important; font-weight: 750; line-height: 1.12; letter-spacing: -.025em; text-wrap: balance; }
+body.platform-tv .feature-meta { gap: 10px; font-size: 14px; color: var(--tv-secondary); }
+body.platform-tv .feature-copy > p { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; max-width: 60ch; margin: 14px 0 20px; font-size: 15px; line-height: 1.55; color: #e2dce1; }
+body.platform-tv .feature-actions { gap: 14px; }
+body.platform-tv .btn { min-height: 46px; padding: 11px 20px; border-radius: 9px; font-size: 16px; font-weight: 650; }
+body.platform-tv .btn.primary { background: var(--accent); color: white; }
+body.platform-tv .row-head { margin: 28px 0 14px; align-items: baseline; }
+body.platform-tv .row-head h2 { font-size: 23px; font-weight: 700; letter-spacing: -.015em; }
+body.platform-tv .row-count { font-size: 13px; color: var(--tv-secondary); }
+body.platform-tv .grid { grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 26px 18px; padding: 6px; }
+body.platform-tv .row-scroll { gap: 18px; padding: 6px 6px 18px; scroll-padding: 6px; }
+body.platform-tv .row-scroll .poster { width: 144px; }
+body.platform-tv .poster { border-radius: 10px; scroll-margin: 14px; }
+body.platform-tv .poster-art { min-height: 0; border-radius: 10px; box-shadow: none; }
+body.platform-tv .poster-info { align-items: flex-start; padding: 10px 1px 4px; gap: 6px; text-align: left; }
+body.platform-tv .poster .p-title { font-size: 16px; line-height: 1.3; font-weight: 650; text-align: left; }
+body.platform-tv .poster .p-year { font-size: 13px; color: var(--tv-secondary); }
+body.platform-tv .poster-cat-badge { display: none; }
+body.platform-tv .q-badges { justify-content: flex-start; gap: 5px; }
+body.platform-tv .q-badge { font-size: 12px; padding: 3px 5px; }
+body.platform-tv .poster-play { width: 42px; height: 42px; background: #c80b21; }
+body.platform-tv .poster.tv-focused .poster-play { opacity: 1; transform: translate(-50%, -50%); }
+body.platform-tv .resume-row { gap: 18px; padding: 6px; }
+body.platform-tv .resume-card { max-width: 50%; padding: 14px; gap: 14px; border: 0; background: var(--tv-panel); }
+body.platform-tv .resume-card-art { flex-basis: 150px; }
+body.platform-tv .resume-card-title { font-size: 17px; }
+body.platform-tv .resume-card-meta { font-size: 14px; }
+body.platform-tv .resume-card.tv-focused .resume-card-play { opacity: 1; }
+body.platform-tv .detail-hero .content { gap: 28px; padding: 26px; }
+body.platform-tv .detail-poster { width: 180px; flex: 0 0 180px; }
+body.platform-tv .d-title { font-family: inherit; font-size: 30px; line-height: 1.18; }
+body.platform-tv .d-overview { max-width: 70ch; font-size: 16px; line-height: 1.6; }
+body.platform-tv .d-overview { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+body.platform-tv .d-id { display: none; }
+body.platform-tv #modalLayer { backdrop-filter: none; }
+body.platform-tv .d-meta, body.platform-tv .d-genres { font-size: 14px; gap: 8px; }
+body.platform-tv .d-actions { gap: 12px; margin-top: 22px; }
+body.platform-tv .detail-tab, body.platform-tv .tabs button, body.platform-tv .collection-tabs button { min-height: 44px; padding: 10px 16px; font-size: 16px; }
+body.platform-tv .quality-item { min-height: 60px; padding: 14px 16px; font-size: 16px; }
+body.platform-tv .quality-item .q-size { font-size: 14px; }
+body.platform-tv input, body.platform-tv select { min-height: 46px; font-size: 16px; }
+body.platform-tv .search-bar { gap: 12px; padding: 14px; }
+body.platform-tv .browse-heading h1, body.platform-tv .page-heading h1 { font-size: 28px; }
+body.platform-tv .browse-view { position: relative; padding-top: 50px; }
+body.platform-tv .browse-view > .page-heading { position: absolute; top: 0; left: 0; width: auto; height: 44px; padding: 0; margin: 0; overflow: visible; white-space: normal; }
+body.platform-tv .browse-view > .page-heading h1 { margin: 0; font-size: 28px; line-height: 44px; }
+body.platform-tv .browse-view .browse-filter-toggle { position: absolute; top: 0; right: 0; margin: 0; }
+body.platform-tv .browse-view .collection-tabs { margin: 0 0 4px; }
+body.platform-tv .browse-count { margin: 5px 0 8px; font-size: 14px; }
+body.platform-tv .empty-state { padding: 36px; font-size: 17px; }
+body.platform-tv .source-notice { font-size: 15px; color: var(--tv-secondary); }
+/* Keep the fallback separate: older Android WebViews reject a whole selector list containing :focus-visible. */
+body.platform-tv .tv-focused { outline: 3px solid var(--tv-focus) !important; outline-offset: 4px !important; }
+body.platform-tv :focus { outline: 3px solid var(--tv-focus) !important; outline-offset: 4px !important; }
+body.platform-tv .collection-tabs .tv-focused, body.platform-tv .detail-tabs .tv-focused { outline-offset: -3px !important; }
+body.platform-tv .tv-source-options { display: flex; flex-direction: column; }
+body.platform-tv .tv-source-option { display: flex; justify-content: space-between; width: 100%; margin: 8px 0; text-align: left; }
+body.platform-tv .tv-source-option small { color: var(--tv-secondary); margin-left: 20px; }
+body.platform-tv .modal-card { max-height: 82vh; padding: 28px; }
+body.platform-tv .modal-card h2 { font-size: 26px; }
+body.platform-tv #sidebar .nav-panel .icon { margin-right: 10px; }
+body.platform-android [data-dl], body.platform-android #btnDownloadSel { display: none; }
+body.platform-tv .tv-focused { position: relative; z-index: 2; }
+body.platform-tv #sidebar .tv-focused { color: white !important; background: #36131c !important; }
+body.platform-tv .tv-remote-hint { position: fixed; bottom: 0; left: 0; right: 0; z-index: 90; display: flex; justify-content: flex-end; gap: 20px; padding: 8px 32px; background: var(--tv-bg); color: var(--tv-secondary); font-size: 12px; pointer-events: none; }
+body.platform-tv .tv-remote-hint b { color: white; font-weight: 650; margin-right: 5px; }
+body.platform-tv[data-flex-gap="unsupported"] #sidebar .sidebar-scroll > * + * { margin-left: 10px; }
+body.platform-tv[data-flex-gap="unsupported"] .resume-card { max-width: calc(50% - 9px); margin-right: 18px; }
+body.platform-tv[data-flex-gap="unsupported"] .resume-card-art { margin-right: 14px; }
+body.platform-tv[data-flex-gap="unsupported"] .tv-remote-hint > span + span { margin-left: 20px; }
+body.platform-tv[data-flex-gap="unsupported"] .poster-info > * + * { margin-top: 6px; }
+body.platform-tv[data-flex-gap="unsupported"] .detail-poster { margin-right: 28px; }
+@media (min-width: 1250px) {
+  body.platform-tv .grid { grid-template-columns: repeat(7, minmax(0, 1fr)); }
+  body.platform-tv .feature-copy h2 { font-size: 40px !important; }
+  body.platform-tv .feature-spotlight { min-height: 280px; }
+  body.platform-tv .row-scroll .poster { width: 174px; }
+}
+@media (max-width: 850px) {
+  body.platform-tv #sidebar { left: 160px; right: 140px; }
+  body.platform-tv #sidebar .sidebar-scroll { gap: 4px; }
+  body.platform-tv #sidebar .nav-trigger, body.platform-tv #sidebar .nav-item { padding-inline: 9px; font-size: 15px; }
+  body.platform-tv #titlebar .tb-brand { font-size: 19px; }
+  body.platform-tv .feature-copy { max-width: 80%; padding: 24px; }
+  body.platform-tv .grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+}
+@media (min-width: 1600px) {
+  body.platform-tv { font-size: 20px; }
+  body.platform-tv #titlebar { height: 96px; padding: 16px 64px; }
+  body.platform-tv #titlebar .tb-brand { font-size: 30px; }
+  body.platform-tv .tb-logo { width: 40px; height: 40px; }
+  body.platform-tv #sidebar { top: 23px; left: 320px; right: 220px; }
+  body.platform-tv #sidebar .nav-item, body.platform-tv #sidebar .nav-trigger { min-height: 50px; padding: 10px 18px; font-size: 20px; }
+  body.platform-tv #sidebar .nav-panel { top: 64px; min-width: 300px; }
+  body.platform-tv #sidebar .nav-panel button { min-height: 52px; font-size: 20px; }
+  body.platform-tv #shell { top: 96px; }
+  body.platform-tv #content { padding: 24px 64px 76px; }
+  body.platform-tv .view { max-width: 1680px; }
+  body.platform-tv .feature-spotlight { min-height: 320px; }
+  body.platform-tv .feature-copy { padding: 32px 36px; }
+  body.platform-tv .feature-copy h2 { font-size: 48px !important; }
+  body.platform-tv .feature-copy > p, body.platform-tv .feature-meta { font-size: 20px; }
+  body.platform-tv .btn { min-height: 56px; padding: 13px 24px; font-size: 20px; }
+  body.platform-tv .row-head h2 { font-size: 30px; }
+  body.platform-tv .row-count, body.platform-tv .browse-count { font-size: 17px; }
+  body.platform-tv .row-scroll .poster { width: 190px; }
+  body.platform-tv .poster .p-title { font-size: 20px; }
+  body.platform-tv .q-badge { font-size: 14px; }
+  body.platform-tv .resume-card-title { font-size: 22px; }
+  body.platform-tv .resume-card-meta { font-size: 18px; }
+  body.platform-tv .browse-view > .page-heading h1 { font-size: 36px; line-height: 56px; }
+  body.platform-tv .browse-view { padding-top: 64px; }
+  body.platform-tv .detail-tab, body.platform-tv .collection-tabs button { min-height: 52px; font-size: 20px; }
+  body.platform-tv .detail-poster { width: 220px; flex-basis: 220px; }
+  body.platform-tv .d-title { font-size: 40px; }
+  body.platform-tv .d-overview, body.platform-tv .d-meta, body.platform-tv .d-genres { font-size: 20px; }
+  body.platform-tv .tv-remote-hint { padding: 12px 64px; font-size: 16px; }
+  body.platform-tv .modal-card { max-width: 640px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  body.platform-tv *, body.platform-tv *::before, body.platform-tv *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}
+
+body.platform-tv .resume-card{flex:0 0 460px;width:460px;max-width:calc(100% - 12px)}
+body.platform-tv[data-flex-gap="unsupported"] .resume-card{max-width:calc(100% - 12px)}
+body.platform-tv .resume-card-art{flex:0 0 104px;width:104px;height:156px}
+body.platform-tv .resume-card-title{white-space:normal;line-height:1.35}

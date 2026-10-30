@@ -1,0 +1,19 @@
+(function(root,factory){if(typeof module==='object'&&module.exports)module.exports=factory;else root.SourceConnection=factory((command,params)=>Platform.nebulaCall(command,params));})(typeof globalThis!=='undefined'?globalThis:this,function(invoke,now=Date.now){
+ let pending=null,generation=0,lastAttempt=-Infinity;
+ function reconnect(force=false){
+  if(pending)return pending;
+  if(!force&&now()-lastAttempt<60000)return Promise.reject(Error('La conexión se volverá a intentar en un momento.'));
+  lastAttempt=now();pending=Promise.resolve().then(()=>invoke('session.reconnect',{})).then(value=>{generation++;return value;}).finally(()=>{pending=null;});return pending;
+ }
+ async function call(command,params={}){
+  if(command==='session.reconnect')return reconnect(true);
+  const started=generation;
+  try{return await invoke(command,params);}catch(error){
+   if(!['session_required','session_expired'].includes(error.code)&&!/sesión.*(?:venc|no está activa)|conecta la fuente.*sesión/i.test(error.message||''))throw error;
+   if(started===generation)await reconnect();
+   return invoke(command,params);
+  }
+ }
+ async function ensure(){const status=await invoke('runtime.status',{});if(status.configured&&status.requiresReconnect)await reconnect();return status;}
+ return {call,ensure,reconnect};
+});
