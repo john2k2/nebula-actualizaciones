@@ -1,0 +1,2368 @@
+'use strict';
+/**
+ * UI del clon (ActivityIntro/ActivityMain/ActivityVideo/ActivitySeries/ActivityDescargas/
+ * SettingsActivity2 del original). Router por hash + vistas.
+ * Eliminado del original: anuncios intersticiales/nativos, puntos y recompensas,
+ * diálogos de consentimiento de ads, login/sincronización, bloqueo de app.
+ */
+const App = (() => {
+  const content = () => document.getElementById('content');
+  const $ = (sel, el = document) => el.querySelector(sel);
+  const $$ = (sel, el = document) => Array.from(el.querySelectorAll(sel));
+  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const tvInterface=()=>Platform.isAndroid&&document.body?.classList.contains('platform-tv');
+
+  let currentView = 'home';
+  let currentRoute = null;
+  const navigation = MoviePlusCore.createNavigation();
+
+  /* El catálogo de la fuente no incluye puntaje: se guarda el de TMDB cuando coincide,
+     para que "ordenar por puntaje" acabe teniendo datos. */
+  const ratingCache = (() => {
+    const raw = Store.settings.ratingCache;
+    return raw && typeof raw === 'object' ? { ...raw } : {};
+  })();
+  let ratingTimer = null;
+  let ratingLastFlush = 0;
+  function flushRatings() {
+    clearTimeout(ratingTimer);
+    ratingTimer = null;
+    ratingLastFlush = Date.now();
+    const keys = Object.keys(ratingCache);
+    if (keys.length > 12000) for (const stale of keys.slice(0, keys.length - 12000)) delete ratingCache[stale];
+    Store.setSetting('ratingCache', ratingCache);
+  }
+  function rememberRating(type, id, value) {
+    const score = MoviePlusUI.ratingValue(value);
+    if (score === null) return;
+    const key = type + ':' + id;
+    if (ratingCache[key] === score) return;
+    ratingCache[key] = score;
+    if (!ratingLastFlush) ratingLastFlush = Date.now();
+    if (!ratingTimer) ratingTimer = setTimeout(flushRatings, 5000);
+    if (Date.now() - ratingLastFlush > 20000) flushRatings();
+  }
+
+  function applyRatings(items) {
+    for (const item of items || []) {
+      if (!item || MoviePlusUI.ratingValue(item.rating) !== null) continue;
+      const cached = ratingCache[item.type + ':' + item.id];
+      if (cached) item.rating = cached;
+    }
+    return items;
+  }
+  function captureRoute(){const active=document.activeElement;if(currentRoute)currentRoute.rowScrolls=$$('.row-scroll,.resume-row',content()).map(el=>el.scrollLeft);navigation.capture(content().scrollTop,active?.id?'id:'+active.id:active?.dataset?.navKey?'card:'+active.dataset.navKey:'');}
+  function back() { captureRoute();const previous = navigation.back(); if (previous) activateRoute(previous); }
+  let toastTimer = null;
+  let homeFilter = 'all';
+  let genreRequest = 0;
+  let homeRequest=0,searchRequest=0,downloadsRequest=0;
+  let modalReturnFocus=null;
+  function applyTextScale(){const scale=Number(Store.settings.textScale)||1;document.documentElement.style.fontSize=(14*([1,1.25,1.5].includes(scale)?scale:1)*(Platform.isAndroid?Math.max(1,Math.min(2,Platform.systemFontScale||1)):1))+'px';}
+  const matchesHome = item => homeFilter === 'all' || item.type === homeFilter;
+  const icon = name => `<svg class="icon" aria-hidden="true"><use href="#i-${name}"/></svg>`;
+
+  const publicMessage=value=>String(value??'').replace(/\bmovieplus\b/gi,'catálogo').replace(/\bxuper\b/gi,'fuente adicional');
+  function toast(msg) {
+    msg=publicMessage(msg);
+    const t = $('#toast');
+    t.textContent = msg;
+    t.classList.remove('hidden');
+    clearTimeout(toastTimer);
+    loaderOpen = false;
+    toastTimer = setTimeout(() => t.classList.add('hidden'), 2600);
+  }
+
+  function toastAction(message,label,action){
+    const t=$('#toast');
+    t.textContent=publicMessage(message)+' ';
+    const button=document.createElement('button');
+    button.type='button';button.className='toast-action';button.textContent=label;
+    button.addEventListener('click',()=>{action();t.classList.add('hidden');});
+    t.appendChild(button);
+    t.classList.remove('hidden');
+    clearTimeout(toastTimer);
+    toastTimer=setTimeout(()=>t.classList.add('hidden'),6000);
+  }
+
+  let loaderOpen = false;
+  function showLoader(message) {
+    const t = $('#toast');
+    t.textContent=publicMessage(message);
+    t.classList.remove('hidden');
+    clearTimeout(toastTimer);
+    loaderOpen = true;
+  }
+  function hideLoader() {
+    if (!loaderOpen) return;
+    loaderOpen = false;
+    $('#toast').classList.add('hidden');
+  }
+
+  /* Salud de fuentes: sondeo con reintento y caché de 10 minutos. */
+  const healthCache = new Map();
+  async function probeSource(key) {
+    try {
+      const result = await Platform.nativeProbe(key);
+      if (result && result.ok) return 'ok';
+      const message = String((result && result.error) || '');
+      return /HTTP[\s]*[45]\d\d|no se pudieron leer|no disponible|rechaz|inv[aá]lid/i.test(message) ? 'dead' : 'unknown';
+    } catch {
+      return 'unknown';
+    }
+  }
+  async function checkSource(url) {
+    const key = String(url);
+    const hit = healthCache.get(key);
+    if (hit && Date.now() - hit.at < 10 * 60 * 1000) return hit.state;
+    let state = 'unknown';
+    const direct = typeof window !== 'undefined' && window.Platform;
+    if (direct && typeof direct.nativeCheck === 'function') {
+      try {
+        const fast = await direct.nativeCheck(key);
+        if (fast && typeof fast.alive === 'boolean') state = fast.alive ? 'ok' : 'dead';
+      } catch {}
+    }
+    if (state === 'unknown') state = await probeSource(key);
+    if (state === 'dead') {
+      await new Promise((done) => setTimeout(done, 1200));
+      state = await probeSource(key);
+    }
+    if (state !== 'unknown') healthCache.set(key, { state, at: Date.now() });
+    return state;
+  }
+
+  /* Arranca con la primera fuente que responde; las muertas se saltan. */
+  async function playVerified(payload) {
+    if(Platform.isAndroid)return Player.open(payload);
+    const list = (payload.urls || []).filter((entry) => entry && entry.url);
+    if (!list.length) return Player.open(payload);
+    const selected=list.find(entry=>entry.url===payload.url)||list[0];
+    const ordered=[selected,...list.filter(entry=>entry!==selected)];
+    // The player already handles source failures. A slow probe must not delay Play.
+    const candidates=ordered.filter(entry=>{const health=healthCache.get(String(entry.url));return !health||Date.now()-health.at>=600000||health.state!=='dead';});
+    const ready=candidates.length?candidates:ordered;
+    return Player.open({...payload,url:ready[0].url,urls:ready});
+  }
+
+  /* Verifica cada fuente y actualiza su tarjeta en vivo; las muertas desaparecen. */
+  async function verifyQualityBox(list) {
+    const box = $('#qualityBox');
+    if (!box || !list.length) return;
+    const heading = box.parentElement && box.parentElement.querySelector('.row-head h2');
+    const note = document.createElement('p');
+    note.className = 'source-notice hidden';
+    note.setAttribute('role', 'status');
+    box.after(note);
+    let hidden = 0;
+    let pending = list.length;
+    const refresh = () => {
+      if (heading) heading.textContent = pending ? 'Fuentes: verificando ' + pending + '…' : 'Fuentes disponibles (' + (list.length - hidden) + ')';
+      if (hidden) {
+        note.textContent = hidden + ' fuente(s) no disponibles quedaron ocultas.';
+        note.classList.remove('hidden');
+      }
+    };
+    [...box.querySelectorAll('.quality-item')].forEach((card) => {
+      card.dataset.state = 'checking';
+      const size = card.querySelector('.q-size');
+      if (size && !card.dataset.size) size.textContent = 'Verificando…';
+    });
+    refresh();
+    let index = 0;
+    const worker = async () => {
+      while (index < Math.min(2, list.length)) {
+        const entry = list[index++];
+        const state = await Promise.race([checkSource(entry.url), new Promise((done) => setTimeout(() => done('unknown'), 15000))]);
+        const card = [...box.querySelectorAll('.quality-item')].find((node) => node.dataset.name === String(entry.name || ''));
+        if (state === 'ok' || state === 'dead') {
+          const salud = { ...(Store.settings.providerHealth || {}) };
+          const clave = entry.providerId || 'movieplus';
+          const actual = salud[clave] || { ok: 0, dead: 0 };
+          if (state === 'ok') actual.ok = (actual.ok || 0) + 1; else actual.dead = (actual.dead || 0) + 1;
+          salud[clave] = actual;
+          Store.setSetting('providerHealth', salud);
+        }
+        if (card && card.isConnected) {
+          card.dataset.state = state;
+          const size = card.querySelector('.q-size');
+          if (state === 'dead') {
+            if (size) size.textContent = 'No disponible';
+            card.classList.add('dead');
+            card.setAttribute('aria-disabled', 'true');
+            setTimeout(() => { if (card.isConnected) { card.remove(); hidden++; refresh(); } }, 1200);
+          } else if (size) {
+            size.textContent = state === 'ok' ? (entry.size || 'Disponible') : (entry.size ? entry.size + ' · sin confirmar' : 'Sin confirmar');
+            card.classList.toggle('unconfirmed', state !== 'ok');
+          }
+        }
+        pending = Math.max(0, pending - 1);
+        refresh();
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(1, list.length) }, worker));
+  }
+
+  function wireEpisodeCard(row) {
+    const play = row.querySelector('button[data-play]');
+    if (!play) return;
+    row.classList.add('episode-playable');
+    row.tabIndex = 0;
+    row.setAttribute('role', 'group');
+    row.setAttribute('aria-label', 'Reproducir ' + (row.querySelector('.ep-name')?.textContent || 'episodio'));
+    row.addEventListener('click', event => { if (!event.target.closest('button, a, input, select')) play.click(); });
+    row.addEventListener('keydown', event => { if (event.target === row && ['Enter', ' '].includes(event.key)) { event.preventDefault(); play.click(); } });
+  }
+
+  /* ============================ Router & Drawer ============================ */
+  function closeDrawer() {
+    document.body?.classList?.remove?.('drawer-open');
+    $('#drawerBackdrop')?.classList?.add?.('hidden');
+  }
+  function toggleDrawer() {
+    const open = !document.body?.classList?.contains?.('drawer-open');
+    document.body?.classList?.toggle?.('drawer-open', open);
+    $('#drawerBackdrop')?.classList?.toggle?.('hidden', !open);
+  }
+  function syncTopbarSearch(q = '') {
+    const hasQuery = Boolean(q && String(q).trim().length);
+    $('#tbSearchClear')?.classList?.toggle?.('hidden', !hasQuery);
+    if (currentView === 'search') {
+      $('#tbTitle').textContent = hasQuery ? String(q).trim() : 'Buscar';
+    }
+  }
+  function go(view, params = {}, remember = true) {
+    closeDrawer();
+    captureRoute();
+    return activateRoute(navigation.open(view,params,remember));
+  }
+  const resumeGate=MoviePlusCore.createPlaybackLaunchGate();
+  function activateRoute(route){
+    resumeGate.cancel();Player.cancelPending?.();visibleRatings.cancel();
+    const {view,params}=route;
+    closeDrawer();
+    if (!$('#playerLayer').classList.contains('hidden')) Player.close();
+    currentRoute = route;
+    const isDetailView = ['person','source','catalog','movie','tv','nebula'].includes(view);
+    $('#tbBack').disabled = !navigation.canBack;
+    $('#titlebar').classList.toggle('has-mobile-back',navigation.canBack&&isDetailView);
+    content().scrollTop = 0;
+    currentView = view;
+    $$('[data-category-nav]').forEach(button=>{const selected=view==='browse'&&button.dataset.categoryNav===(params.category||'movies');button.classList.toggle('active',selected);if(selected)button.setAttribute('aria-current','page');else button.removeAttribute('aria-current');});
+    $$('.nav-item').forEach((b) => {b.classList.toggle('active', b.dataset.view === view);if(b.dataset.view===view)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});
+    const catLabels = { movies: 'Películas', series: 'Series', anime: 'Anime', cartoons: 'Cartoons', doramas: 'Doramas', duanju: 'Duanju', telenovelas: 'Telenovelas' };
+    const mylistLabels = { favorites: 'Favoritos', continue: 'Continuar', history: 'Historial Repr.', watched: 'Vistos' };
+    const titles = {
+      home: 'Inicio',
+      browse: catLabels[params.category || 'movies'] || 'Películas',
+      search: params.q ? String(params.q).trim() : 'Buscar',
+      person: params.name || 'Filmografía',
+      mylist: mylistLabels[params.tab || 'favorites'] || 'Favoritos',
+      downloads: 'Descargas',
+      settings: 'Ajustes',
+      source: 'Detalle',
+      catalog: 'Ficha',
+      movie: 'Película',
+      tv: 'Serie',
+    };
+    const navTitle = titles[view] || 'Nébula';
+  $('#tbTitle').textContent = navTitle === 'Inicio' ? '' : navTitle;
+    $('#tbSearchClear')?.classList?.toggle?.('hidden', !(view === 'search' && params.q));
+    const rendering=(()=>{switch (view) {
+      case 'home': return renderHome();
+      case 'browse': return renderBrowse(params);
+      case 'search': return renderSearch(params);
+      case 'person': return renderPerson(params);
+      case 'nebula': return renderDetail('movie', params.id);
+      case 'mylist': return renderMyList(params);
+      case 'downloads': return renderDownloads();
+      case 'settings': return renderSettings();
+      case 'movie': return renderDetail('movie', params.id);
+      case 'tv': return renderDetail('tv', params.id);
+      case 'catalog': return renderCatalogDetail(params.id, params.catalogUrl);
+      case 'source': return renderSourceDetail(params.kind, params.id);
+      default: return renderHome();
+    }})();
+    Promise.resolve(rendering).then(()=>{
+      if(currentRoute!==route)return;
+      content().scrollTop=route.scrollTop||0;
+      if(Array.isArray(route.rowScrolls))$$('.row-scroll,.resume-row',content()).forEach((el,i)=>{if(route.rowScrolls[i])el.scrollLeft=route.rowScrolls[i];});
+      const [kind,...parts]=(route.focusKey||'').split(':');const key=parts.join(':');
+      const target=kind==='id'?document.getElementById(key):kind==='card'?$$('[data-nav-key]').find(node=>node.dataset.navKey===key):null;
+      target?.focus({preventScroll:true});
+    }).catch(error=>{if(currentRoute===route)content().innerHTML=MoviePlusUI.emptyMessage('No se pudo abrir esta pantalla',publicMessage(error.message));});
+    return rendering;
+  }
+
+  /* ============================ Inicio ============================ */
+  async function renderHome() {
+    const route=currentRoute,request=++homeRequest;
+    homeFilter=['all','movie','tv'].includes(route.params.filter)?route.params.filter:'all';
+    const sort=['source','year','rating','rating-asc','title'].includes(route.params.sort)?route.params.sort:'year';
+    content().innerHTML = `
+      <div class="view">
+        <div class="row-head"><h2>⏳ Cargando catálogo…</h2></div>
+        <div class="grid">${'<div class="poster skeleton"></div>'.repeat(8)}</div>
+      </div>`;
+
+    const settings = Store.settings;
+    let rows=[],catRows={items:[],errors:[],loading:true},sourceRows=[];
+    async function paintHome(){
+    if (currentRoute!==route||request!==homeRequest) return;
+    const movies = catRows.items.filter(item => item.type === 'movie');
+    const series = catRows.items.filter(item => item.type === 'tv');
+    const byId = new Map(catRows.items.map(item => [`${item.type}:${item.id}`, item]));
+    const catalogFor = (item) => byId.get(`${item.type}:${item.id}`) || API.findCatalogItem(item.type, item.id, item);
+    for (const item of rows.flatMap(row => row.items || [])) {
+      const catalogItem = catalogFor(item);
+      if (catalogItem && !Number(catalogItem.rating) && Number(item.rating)) { catalogItem.rating = item.rating; rememberRating(catalogItem.type, catalogItem.id, item.rating); }
+    }
+    // Destacado rotativo: cambia cada 6 h entre los títulos de TMDB que están en el catálogo,
+    // porque son los que traen sinopsis, arte y puntaje.
+    if (!catRows.rated) { applyRatings(catRows.items); catRows.rated = true; }
+    const spotSeed = Math.floor(Date.now() / (6 * 60 * 60 * 1000));
+    const spotCandidates = rows.flatMap(row => row.items || []).filter(item => (homeFilter === 'all' || item.type === homeFilter) && catalogFor(item));
+    const spotRanked = MoviePlusCore.orderItems(spotCandidates, 'rating');
+    const spotPool = spotRanked.length ? spotRanked : MoviePlusCore.orderItems(movies.concat(series), 'rating');
+    const spotBase = spotPool.length ? spotPool[spotSeed % Math.min(spotPool.length, 20)] : null;
+    const featured = spotBase ? { ...spotBase, ...(catalogFor(spotBase) || {}), backdrop: spotBase.backdrop || spotBase.poster, overview: spotBase.overview } : null;
+    const latest = items => MoviePlusCore.orderItems(items,sort).slice(0,Platform.isAndroid?12:24);
+    const continueList = Store.resumeList.slice(0, 40);
+    const isPremiereRow=row=>/cartelera|estrenos/i.test(row.title||'');
+    
+    let html = `<div class="view home-view"><header class="home-heading sr-only"><div><h1>Inicio</h1></div><div class="catalog-health"><span></span>${catRows.items.length ? 'Catálogo conectado' : 'Explora tus fuentes'}</div></header>
+      `;
+    if (featured) html += `<section class="feature-spotlight">${featured.backdrop || featured.poster ? `<img class="feature-art" alt="" src="${esc(featured.backdrop || featured.poster)}"/>` : ''}<div class="feature-shade"></div><div class="feature-copy"><h2>${esc(featured.title)}</h2><div class="feature-meta"><span>${featured.type === 'tv' ? 'Serie' : 'Película'}</span><span>${esc(String(featured.year || '').slice(0, 4))}</span>${featured.qualities?.[0] ? `<span>${esc(featured.qualities[0].name)}</span>` : ''}${MoviePlusUI.ratingValue(featured.rating) !== null ? `<span class="feature-rating">★ ${MoviePlusUI.ratingValue(featured.rating).toFixed(1)}</span>` : ''}${featured.runtime ? `<span>${esc(featured.runtime)} min</span>` : ''}${(featured.genres && featured.genres.length ? featured.genres : MoviePlusCore.catalogGenres(featured).map(genreLabel)).filter(Boolean).slice(0, 3).map((genre) => `<span>${esc(genre)}</span>`).join('')}</div><p>${esc(featured.overview || 'Descubre una nueva historia. Elige tu fuente y continúa donde lo dejaste.')}</p><div class="feature-actions">${featured.type === 'movie' && featured.urls?.length ? `<button class="btn primary" id="featurePlay"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg>Reproducir</button>` : ''}${featured.type === 'tv' ? (() => { const saved = Store.resumeList.find((entry) => entry.type === 'tv' && String(entry.id) === String(featured.id) && entry.season); return `<button class="btn primary" id="featurePlaySeries"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg>${saved ? `Continuar T${saved.season}·E${saved.episode}` : 'Reproducir T1·E1'}</button>`; })() : ''}<button class="btn feature-details" id="featureDetails">Ver detalles</button></div></div></section>`;
+    if (catRows.errors?.length) html += `<div class="empty-state"><div>No se pudo actualizar el catálogo: ${esc(catRows.errors[0])}</div><div>Revisa la URL en Ajustes.</div><button class="btn" id="homeRetry" type="button">Reintentar</button></div>`;
+    if(catRows.notices?.length)html+=`<p role="status" class="source-notice">${esc(catRows.notices[0])}</p>`;
+    
+    // Estrenos es la primera fila del catálogo.
+    rows.filter(isPremiereRow).forEach(row=>{html+=homeRow(row.title,row.items.filter(matchesHome).slice(0,Platform.isAndroid?12:20));});
+    if (continueList.length) html += resumeWideRow(continueList);
+    
+    if(catRows.loading)html+='<p class="source-notice" role="status">Cargando catálogo…</p>';
+    // 3. Grilla directa estilo MoviePlus original + filas
+    if (catRows && catRows.items && catRows.items.length) {
+      const gridPool = homeFilter === 'tv' ? latest(series) : homeFilter === 'movie' ? latest(movies) : MoviePlusCore.orderItems(catRows.items, sort).slice(0, Platform.isAndroid?10:24);
+      if (gridPool.length && !(Platform.isAndroid&&document.body?.classList.contains('platform-tv'))) {
+        html += `<div class="row-head"><h2>Agregados recientemente</h2></div><div class="grid">${gridPool.map(it => posterCard(it)).join('')}</div>`;
+      }
+      if (homeFilter !== 'tv') html += homeRow('Películas recientes', latest(movies));
+      if (homeFilter !== 'movie') html += homeRow('Series del catálogo', latest(series));
+    }
+    
+    // 4. Filas de archivos (jellyfin/archive)
+    sourceRows.forEach((r) => {
+      if (r.status === 'fulfilled') r.value.forEach((row) => { html += homeRow(row.title, row.items.filter(matchesHome)); });
+    });
+    
+    // 5. Las filas principales del TMDB homeRows
+    (rows || []).forEach((r) => { 
+      if (r.items && r.items.length && !isPremiereRow(r)) {
+        html += homeRow(r.title, r.items.filter(matchesHome).slice(0, Platform.isAndroid?12:20));
+      }
+    });
+
+    // 6. Descubrimiento por género, orden y familias del catálogo
+    html += `<section class="home-discovery"><div class="row-head home-discovery-head"><h2>Explorar por género</h2><div class="browse-order"><label for="homeOrder">Ordenar</label><select id="homeOrder"><option value="year">Más recientes</option><option value="source">Orden de la fuente</option><option value="rating">Puntaje (mayor a menor)</option><option value="rating-asc">Puntaje (menor a mayor)</option><option value="title">Título</option></select></div></div>`;
+    html += genreSection();
+    html += categoryLinks();
+    html += '</section></div>';
+    
+    const scroll=content().scrollTop||route.scrollTop||0;
+    const focused=content().contains(document.activeElement)?document.activeElement:null;
+    if(focused&&/^(INPUT|SELECT|TEXTAREA)$/.test(focused.tagName))return;
+    const focusedKey=focused?.dataset?.navKey;
+    const focusedTop=focusedKey?focused.getBoundingClientRect().top:0;
+    content().innerHTML = html;
+    content().scrollTop=scroll;
+    if(Array.isArray(route.rowScrolls))$$('.row-scroll,.resume-row',content()).forEach((el,i)=>{if(route.rowScrolls[i])el.scrollLeft=route.rowScrolls[i];});
+    $$('[data-home-filter]').forEach(button => {button.setAttribute('aria-pressed',String(button.dataset.homeFilter===homeFilter));button.onclick = () => { const clicked=button.dataset.homeFilter; currentRoute.params.filter=(clicked===homeFilter&&clicked!=='all')?'all':clicked; renderHome(); }; });
+    $('#homeOrder').value=sort;$('#homeOrder').onchange=()=>{currentRoute.params.sort=$('#homeOrder').value;renderHome();};
+    if ($('#featureDetails')) $('#featureDetails').onclick = () => go('catalog', { id: featured.id, catalogUrl: featured.catalogUrl });
+    if ($('#featurePlay')) $('#featurePlay').onclick = () => resumeItem(featured.type,featured.id,0,0);
+  if ($('#featurePlaySeries')) $('#featurePlaySeries').onclick = () => resumeItem('tv', featured.id, 0, 0);
+    wirePosters();
+    $$('.resume-card').forEach((card) => {
+      card.onclick = () => resumeItem(card.dataset.resumeType, card.dataset.resumeId, Number(card.dataset.resumeSeason), Number(card.dataset.resumeEpisode));
+    });
+    const groups = $$('#sidebar .nav-group');
+    groups.forEach((group) => group.addEventListener('toggle', () => {
+      if (group.open) groups.forEach((other) => { if (other !== group) other.open = false; });
+    }));
+    $$('#sidebar [data-category-nav], #sidebar .nav-panel .nav-item').forEach((entry) => entry.addEventListener('click', () => groups.forEach((group) => { group.open = false; })));
+    wireCarouselArrows();
+    if(focusedKey){const restored=$$('[data-nav-key]',content()).find(card=>card.dataset.navKey===focusedKey);if(restored){restored.focus({preventScroll:true});content().scrollTop+=restored.getBoundingClientRect().top-focusedTop;}}
+
+    if ($('#homeRetry')) $('#homeRetry').onclick = () => renderHome();
+    wireCategoryLinks();
+    if(route.params.genre)await loadGenre(Number(route.params.genre));
+    }
+    await Promise.allSettled([
+      API.homeRows().catch(()=>[]).then(value=>{rows=value;return paintHome();}),
+      API.loadCatalogs(settings.catalogUrls).catch(error=>({items:[],errors:[publicMessage(error.message)]})).then(value=>{catRows=value;return paintHome();}),
+      Promise.allSettled([API.jellyfinRows()]).then(value=>{sourceRows=value;return paintHome();}),
+    ]);
+    // Recuperar la actualización de fondo sin interrumpir una interacción o cambiar de vista.
+    setTimeout(async()=>{
+      if(currentRoute!==route||request!==homeRequest)return;
+      const latest=await API.loadCatalogs(settings.catalogUrls).catch(()=>null);
+      if(!latest||currentRoute!==route||request!==homeRequest)return;
+      if(latest.items.length!==catRows.items.length||latest.items.some((item,index)=>item!==catRows.items[index])){catRows=latest;await paintHome();}
+    },30000);
+  }
+
+  const GENRE_LABELS={28:'Acción',12:'Aventura',16:'Animación',35:'Comedia',80:'Crimen',99:'Documental',18:'Drama',10751:'Familia',14:'Fantasía',36:'Historia',27:'Terror',10402:'Música',9648:'Misterio',10749:'Romance',878:'Ciencia ficción',10770:'Película de TV',53:'Suspenso',10752:'Bélica',37:'Western',10759:'Acción y aventura',10762:'Niños',10763:'Noticias',10764:'Reality',10765:'Ciencia ficción y fantasía',10766:'Telenovela',10767:'Talk show',10768:'Guerra y política'};
+  const genreLabel=value=>GENRE_LABELS[value]||(/^\d+$/.test(value)?'Género '+value:value);
+
+  function categoryLinks(selected='') {
+    return `<div class="category-links" role="group" aria-label="Categorías">${MoviePlusCore.CATALOG_CATEGORIES.map(category=>`<button data-category="${category.id}" aria-pressed="${selected===category.id}">${esc(category.label)}</button>`).join('')}</div>`;
+  }
+  function wireCategoryLinks(){ $$('[data-category]').forEach(button=>button.onclick=()=>go('browse',{category:button.dataset.category})); }
+  async function renderBrowse(params={}) {
+    const route=currentRoute;
+    const headingClass=tvInterface()?'page-heading':'page-heading sr-only';
+    const category=MoviePlusCore.CATALOG_CATEGORIES.find(category=>category.id===(params.category==='anime'&&params.subtype==='cartoons'?'cartoons':params.category))||MoviePlusCore.CATALOG_CATEGORIES[0];
+    route.params.category=category.id;
+    $('#tbTitle').textContent = category.label;
+    $$('[data-category-nav]').forEach(button=>{const active=button.dataset.categoryNav===category.id;button.classList.toggle('active',active);if(active)button.setAttribute('aria-current','page');else button.removeAttribute('aria-current');});
+    content().innerHTML=`<div class="view browse-view"><header class="${headingClass}"><h1>${esc(category.label)}</h1><p role="status">Cargando el catálogo…</p></header><div class="grid">${'<div class="poster skeleton"></div>'.repeat(12)}</div></div>`;
+    const catalog=await API.loadCatalogs(Store.settings.catalogUrls).catch(error=>({items:[],errors:[publicMessage(error.message)]}));
+    applyRatings(catalog.items);
+    if(currentRoute!==route)return;
+    const family=catalog.items.filter(item=>MoviePlusCore.catalogCategory(item)===category.id);
+    const genres=[...new Set(family.flatMap(MoviePlusCore.catalogGenres))];
+    const years=[...new Set(family.map(item=>String(item.year||'').slice(0,4)).filter(year=>/^\d{4}$/.test(year)))].sort().reverse();
+    const collections=[['recent','Recientes'],['history','Historial Repr.'],['for-you','Para Ti'],['recommended','Recomendados'],['popular','Populares']];
+    if(family.some(MoviePlusCore.catalogUpdated))collections.splice(2,0,['updated','Actualizadas']);
+    let collection=collections.some(([value])=>value===params.collection)?params.collection:'recent';
+    let recommendationRows=[],recommendationsLoading=true,recommendationsFailed=false;
+    let page=Math.max(1,Math.min(1000,Number(params.page)||1));
+    const select=(id,label,options,value)=>`<label for="${id}">${label}<select id="${id}">${options.map(([key,text])=>`<option value="${esc(key)}" ${String(key)===String(value||'')?'selected':''}>${esc(text)}</option>`).join('')}</select></label>`;
+    content().innerHTML=`<div class="view browse-view"><header class="${headingClass}"><h1>${esc(category.label)}</h1></header>
+      <div class="collection-tabs" role="group" aria-label="Listas de ${esc(category.label)}">${collections.map(([value,label])=>`<button data-collection="${value}" aria-pressed="${value===collection}">${label}</button>`).join('')}</div>
+      ${categoryLinks(category.id)}<div class="browse-category-mobile">${select('browseCategory','Categoría',MoviePlusCore.CATALOG_CATEGORIES.map(item=>[item.id,item.label]),category.id)}</div>
+      <button class="btn browse-filter-toggle" id="browseFiltersToggle" aria-expanded="${!!params.filtersOpen}" aria-controls="browseFilters">${icon('sliders')}Filtros y orden</button><div class="browse-filters" id="browseFilters" ${!params.filtersOpen?'data-collapsed':''}>${select('browseGenre','Género',[['','Todos los géneros'],...genres.sort((a,b)=>genreLabel(a).localeCompare(genreLabel(b),'es')).map(value=>[value,genreLabel(value)])],params.genre)}${select('browseYear','Año',[['','Todos los años'],...years.map(value=>[value,value])],params.year)}${select('browseQuality','Calidad e idioma',[['','Todas las opciones'],['4K','4K'],['1080','1080p'],['720','720p'],['CAST','Castellano'],['IMAX','IMAX']],params.quality)}${select('browseOrder','Ordenar',[['source','Orden de la lista'],['year','Año de estreno'],['rating','Puntaje (mayor a menor)'],['rating-asc','Puntaje (menor a mayor)'],['title','Título A–Z']],params.order)}<button class="btn" id="browseReset">Limpiar filtros</button></div>
+      ${catalog.errors?.length?`<div class="source-notice" role="status">No se pudieron consultar todas las fuentes. <button class="btn" id="browseRetry">Reintentar</button></div>`:''}
+      <p class="browse-explanation sr-only" id="browseExplanation"></p><p class="sr-only" id="browseCount" role="status" aria-live="polite"></p><div id="browseEmpty"></div><div class="grid" id="browseGrid"></div><div class="browse-more"><button class="btn" id="browseMore">Mostrar más</button></div></div>`;
+    wireCategoryLinks();
+    $('#browseCategory').onchange=()=>go('browse',{category:$('#browseCategory').value});
+    $('#browseFiltersToggle').onclick=()=>{const open=$('#browseFiltersToggle').getAttribute('aria-expanded')!=='true';$('#browseFiltersToggle').setAttribute('aria-expanded',String(open));$('#browseFilters').toggleAttribute('data-collapsed',!open);route.params.filtersOpen=open;};
+    const hasQualityMetadata=family.some(item=>item.resolutions||(item.qualities||[]).some(quality=>quality.name));
+    if(!hasQualityMetadata){const quality=$('#browseQuality');quality.value='';quality.disabled=true;quality.options[0].textContent='Consultar en cada episodio';quality.title='La fuente informa la calidad al consultar cada episodio.';}
+    const key=MoviePlusCore.browseKey;
+    function draw(){
+      if(currentRoute!==route)return;
+      const favorites=Store.favorites||[];
+      const historyMap=new Map();for(const item of [...(Store.resumeList||[]),...(Store.watchedTitlesList||[])]){const k=key(item),at=Number(item.updatedAt||item.at)||0;const previous=historyMap.get(k);if(!previous||at>previous.at)historyMap.set(k,{item,at});}
+      const history=[...historyMap.values()].sort((a,b)=>b.at-a.at).map(entry=>key(entry.item));
+      const preferenceItems=favorites.map(item=>API.findCatalogItem(item.type,item.id,item)||item);
+      const preferredGenres=[...new Set(preferenceItems.flatMap(MoviePlusCore.catalogGenres))];
+      const rowKeys=predicate=>recommendationRows.filter(predicate).flatMap(row=>row.items||[]).map(key);
+      const options={category:category.id,subtype:$('#browseSubtype')?.value||'',genre:$('#browseGenre').value,year:$('#browseYear').value,quality:$('#browseQuality').value,order:$('#browseOrder').value,collection,favoriteKeys:favorites.map(key),historyKeys:history,popularKeys:rowKeys(row=>/populares/i.test(row.title)),recommendedKeys:rowKeys(row=>/tendencias/i.test(row.title)),preferredGenres};
+      let result=MoviePlusCore.browseCatalog(catalog.items,options);
+      if(['rating','rating-asc','year','title'].includes(options.order))result=MoviePlusCore.orderItems(result,options.order);
+  
+      let crossCategoryNotice='';
+      if(!result.length&&!['anime','cartoons'].includes(category.id)&&(collection==='history'||collection==='favorites')){
+        const targetKeys=collection==='history'?history:favorites.map(key);
+        const crossMatches=catalog.items.filter(item=>targetKeys.includes(key(item)));
+        if(crossMatches.length){
+          result=crossMatches.sort((a,b)=>targetKeys.indexOf(key(a))-targetKeys.indexOf(key(b)));
+          crossCategoryNotice=' Mostrando tus títulos de todas las categorías.';
+        }
+      }
+      Object.assign(route.params,{...options,favoriteKeys:undefined,historyKeys:undefined,popularKeys:undefined,recommendedKeys:undefined,preferredGenres:undefined,page});
+      const descriptions={recent:'Orden de incorporación a la fuente.',updated:'Actualizaciones informadas por la fuente.', 'for-you':'Títulos con géneros de tus favoritos, sin incluir los que ya viste.',recommended:'Tendencias de TMDB que también están en tus fuentes.',popular:'Populares de TMDB que también están en tus fuentes.',history:'Últimas reproducciones y títulos marcados como vistos.',favorites:'Tus favoritos, del más reciente al más antiguo.'};
+      $('#browseExplanation').textContent=descriptions[collection]+crossCategoryNotice+(!hasQualityMetadata&&family.length?' La calidad y el idioma se consultan en cada episodio.':options.quality?' Se filtran títulos cuya fuente informa esta calidad o idioma.':'');
+      const displayed=result.slice(0,page*60);
+      const activeFilters=[options.subtype,options.genre,options.year,options.quality,options.order&&options.order!=='source'?options.order:''].filter(Boolean).length;
+      if($('#browseFiltersToggle'))$('#browseFiltersToggle').innerHTML=`${icon('sliders')}Filtros y orden${activeFilters?` (${activeFilters})`:''}`;
+      $('#browseCount').textContent='Resultados actualizados.';
+      let message='No hay títulos con estos filtros. Prueba otra categoría o limpia los filtros.';
+      if(!family.length)message='Tus fuentes todavía no incluyen títulos identificados en esta categoría.';
+      else if(collection==='for-you'&&!preferredGenres.length)message='Agrega favoritos para descubrir títulos de sus géneros.';
+      else if(['popular','recommended'].includes(collection)&&recommendationsLoading)message='Consultando las listas de TMDB…';
+      else if(['popular','recommended'].includes(collection)&&recommendationsFailed)message='No se pudo consultar TMDB. Puedes seguir explorando Recientes.';
+      else if(collection==='favorites')message='No hay favoritos en esta categoría con estos filtros.';
+      else if(collection==='history')message='Todavía no hay reproducciones o títulos vistos en esta categoría con estos filtros.';
+      $('#browseEmpty').innerHTML=result.length?'':emptyState('🎬',message);
+      $('#browseGrid').innerHTML=displayed.map(item=>posterCard(item)).join('');
+      $('#browseMore').hidden=displayed.length>=result.length;
+      $$('[data-collection]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.collection===collection)));
+      wirePosters();
+    }
+    for(const id of ['browseSubtype','browseGenre','browseYear','browseQuality','browseOrder']){const select=$('#'+id);if(select)select.onchange=()=>{page=1;draw();};}
+    $$('[data-collection]').forEach(button=>button.onclick=()=>{collection=button.dataset.collection;page=1;draw();});
+    $('#browseReset').onclick=()=>{for(const id of ['browseSubtype','browseGenre','browseYear','browseQuality'])if($('#'+id))$('#'+id).value='';$('#browseOrder').value='source';page=1;draw();};
+    $('#browseMore').onclick=()=>{page++;draw();};
+    if($('#browseRetry'))$('#browseRetry').onclick=()=>{API.invalidate();renderBrowse(route.params);};
+    draw();
+    API.homeRows().then(rows=>{recommendationRows=rows;recommendationsLoading=false;if(['popular','recommended'].includes(collection))draw();}).catch(()=>{recommendationsLoading=false;recommendationsFailed=true;if(['popular','recommended'].includes(collection))draw();});
+  }
+
+  /* Fila con pocos títulos: tarjeta ancha con progreso y tiempo restante. */
+function resumeWideRow(items) {
+  const cards = items.map((it) => {
+    let meta = {};
+    try { meta = API.findCatalogItem(it.type, it.id) || {}; } catch {}
+    const title = it.title || meta.title || 'Sin título';
+    const poster = it.poster || meta.urlImage || '';
+    const pct = it.duration ? Math.max(2, Math.min(100, Math.round((it.position / it.duration) * 100))) : 0;
+    const left = it.duration ? Math.max(1, Math.round((it.duration - it.position) / 60)) : 0;
+    const label = it.type === 'tv' && it.season ? 'T' + it.season + '·E' + it.episode : '';
+    return `<button class="resume-card" type="button" data-nav-key="resume:${esc(it.type)}:${esc(String(it.id))}:${it.season || 0}:${it.episode || 0}" data-resume-type="${esc(it.type)}" data-resume-id="${esc(String(it.id))}" data-resume-season="${it.season || 0}" data-resume-episode="${it.episode || 0}">
+      <span class="resume-card-art">${poster ? `<img alt="" loading="lazy" decoding="async" width="96" height="144" src="${esc(poster)}"/>` : ''}<span class="resume-card-play"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg></span></span>
+      <span class="resume-card-body">
+        <span class="resume-card-title">${esc(title)}</span>
+        <span class="resume-card-meta">${label ? esc(label) + ' · ' : ''}${left ? 'Quedan ' + left + ' min' : 'Continuar'}</span>
+        <span class="resume-card-bar" aria-hidden="true"><span style="width:${pct}%"></span></span>
+      </span>
+    </button>`;
+  }).join('');
+  return `<div class="row-head"><h2>Seguir viendo</h2></div><div class="resume-row">${cards}</div>`;
+}
+
+function homeRow(title, items, isResume = false) {
+    if (!items || !items.length) return '';
+    return `
+      <div class="row-head"><h2>${esc(title.replace(/^[^\p{L}\p{N}]+/u, ''))}</h2></div>
+      <div class="row-scroll">
+        ${items.map((it) => posterCard(it, isResume)).join('')}
+      </div>`;
+  }
+
+  function compactResolutionBadges(it) {
+    const rawList = [
+      ...(it.qualities || []).map((q) => q.name || ''),
+      String(it.resolutions || ''),
+    ].join(' ');
+    const found = [];
+    const push = (label, cls = '') => {
+      if (!found.some((x) => x.label === label)) found.push({ label, cls });
+    };
+    if (/\b(?:4K|2160p?)\b/i.test(rawList)) push('4K', 'v');
+    if (/\b1080p?\b/i.test(rawList)) push('1080', '');
+    if (/\b720p?\b/i.test(rawList)) push('720', '');
+    if (/\b480p?\b/i.test(rawList)) push('480', '');
+    if (!found.length && /\b(?:CAM|TS|HDTC)\b/i.test(rawList)) push('CAM', '');
+    return found.slice(0, 3).map((b) => `<span class="q-badge${b.cls ? ' ' + b.cls : ''}">${b.label}</span>`).join('');
+  }
+
+  function posterCategoryBadge(it) {
+    const cat = MoviePlusCore.catalogCategory(it);
+    if (cat === 'anime') return '<span class="poster-cat-badge" aria-hidden="true">😊</span>';
+    if (cat === 'doramas') return '<span class="poster-cat-badge" aria-hidden="true">🎭</span>';
+    if (cat === 'telenovelas') return '<span class="poster-cat-badge" aria-hidden="true">👥</span>';
+    if (cat === 'duanju') return '<span class="poster-cat-badge" aria-hidden="true">📱</span>';
+    if (cat === 'series' || it.type === 'tv') return '<span class="poster-cat-badge" aria-hidden="true">📺</span>';
+    return '';
+  }
+
+  function posterCard(it, isResume = false) {
+    const catalogItem = API.findCatalogItem(it.type, it.id,it);
+    if (catalogItem) it = { ...it, ...catalogItem, rating: MoviePlusUI.ratingValue(catalogItem.rating,it.rating), position: it.position, duration: it.duration, season: it.season, episode: it.episode };
+    const key = `${it.type}:${it.id}`;
+    const typeLabel=it.type==='tv'?(isResume&&it.season&&it.episode?`Serie · T${it.season}·E${it.episode}`:'Serie'):it.type==='movie'?'Película':'Título';
+    const fav = Store.isFavorite(it.type, it.id);
+    const seen = Store.isWatched(it.type, it.id) || (it.type === 'tv' && false);
+    const badges = compactResolutionBadges(it);
+    const score = MoviePlusUI.ratingValue(it.rating);
+    const topFlags = [];
+    const rawRes = String(it.resolutions || '');
+    if (it.showSpainFlag || /\bCAST\b/i.test(rawRes)) topFlags.push('<span class="flag-circle" aria-label="Castellano">🇪🇸</span>');
+    else if (it.showMxFlag || /\b(?:LAT|DUAL)\b/i.test(rawRes)) topFlags.push('<span class="flag-circle" aria-label="Latino">🇲🇽</span>');
+    else if (it.showSubFlag || /\bSUB\b/i.test(rawRes)) topFlags.push('<span class="flag-circle" aria-label="Subtitulado">🇺🇸</span>');
+    if (fav) topFlags.push('<span class="flag-circle fav" aria-label="En Mi lista">♥</span>');
+    if (seen) topFlags.push('<span class="flag-circle seen" aria-label="Visto">✓</span>');
+    const resumePct = isResume && it.duration ? Math.min(100, Math.round((it.position / it.duration) * 100)) : 0;
+    const yearStr = it.year ? String(it.year).slice(0, 4) : '';
+    const resumeEpStr = isResume && it.type === 'tv' && it.season && it.episode ? ` · T${it.season}E${it.episode}` : '';
+    const img = it.poster
+      ? `<img loading="lazy" decoding="async" width="342" height="513" src="${esc(it.poster)}" alt=""/>`
+      : '';
+    return `
+      <div class="poster" role="button" tabindex="0" data-nav-key="${esc(key)}" aria-label="${esc(it.title+' · '+typeLabel+(yearStr?' · '+yearStr:''))}" data-type="${esc(it.type)}" data-id="${esc(it.id)}" data-kind="${esc(it.kind || '')}" data-catalog="${esc(it.catalogUrl || '')}" data-source="${esc(it.source || '')}" data-resume="${isResume ? '1' : ''}" data-season="${esc(it.season || 0)}" data-episode="${esc(it.episode || 0)}">
+        <div class="poster-art">${img}<div class="ph ${it.poster?'hidden':''}" aria-hidden="true"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg></div>
+        ${posterCategoryBadge(it)}
+        <span class="poster-play"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg></span>
+        ${topFlags.length ? `<div class="poster-flags">${topFlags.join('')}</div>` : ''}
+        ${resumePct ? `<div class="progress-bar"><div style="width:${resumePct}%"></div></div>` : ''}
+        </div><div class="poster-info"><div class="q-badges">${score ? `<span class="q-badge rating">★ ${score.toFixed(1)}</span>` : ''}${badges || ''}</div>
+        <div class="p-title"><span class="poster-name">${esc(it.title)}${yearStr ? ` (${esc(yearStr)})` : ''}${esc(resumeEpStr)}</span></div></div>
+      </div>`;
+  }
+
+  /* Completa el puntaje de lo que está en pantalla, de a poco y con caché. */
+  const visibleRatings=VisibleRatings.create({
+    load:item=>API.ratingFor(item.type,item.id),
+    remember:(item,score)=>rememberRating(item.type,item.id,score),
+    read:item=>ratingCache[item.type+':'+item.id],
+    connected:card=>document.contains(card),
+    observe:typeof IntersectionObserver==='function'?(callback,root)=>new IntersectionObserver(callback,{root,rootMargin:'160px'}):null,
+    paint:(card,score)=>{
+      let holder=card.querySelector('.q-badges');
+      if(!holder){holder=document.createElement('div');holder.className='q-badges';card.querySelector('.poster-info')?.prepend(holder);}
+      if(!holder)return;
+      let badge=holder.querySelector('.rating');
+      if(!badge){badge=document.createElement('span');badge.className='q-badge rating';holder.prepend(badge);}
+      badge.textContent='★ '+Number(score).toFixed(1);
+      for(const duplicate of Array.from(holder.querySelectorAll('.rating')).slice(1))duplicate.remove();
+    }
+  });
+  function enrichVisibleRatings(){visibleRatings.start($$('.poster[data-type]',content()),content());}
+
+  function wirePosters() {
+    $$('.poster').forEach((p) => {
+      if (p.dataset.bound) return;
+      p.dataset.bound = '1';
+      const img = p.querySelector('.poster-art img');
+      const ph = p.querySelector('.poster-art .ph');
+      if (img && ph) {
+        img.addEventListener('error', () => { img.classList.add('hidden'); ph.classList.remove('hidden'); }, { once: true });
+      }
+      p.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); p.click(); } });
+      p.addEventListener('click', () => {
+        const { type, id, kind, catalog } = p.dataset;
+        if (type === 'local' && p.dataset.source) { Player.open({ type, id, title: p.getAttribute('aria-label'), kind: 'stream', url: p.dataset.source }); return; }
+        if (kind === 'nebula' || id.startsWith('nebula:')) { go(type==='tv'?'tv':'movie', {id}); return; }
+        if (p.dataset.resume === '1') { resumeItem(type, id, Number(p.dataset.season), Number(p.dataset.episode)); return; }
+        if (kind === 'archive' || kind === 'jellyfin') {
+          go('source', { kind, id });
+        } else if (kind === 'catalog' || catalog) {
+          go('catalog', { id, catalogUrl: catalog });
+        } else {
+          go(type === 'tv' ? 'tv' : 'movie', { id });
+        }
+      });
+    });
+    enrichVisibleRatings();
+  }
+
+  async function resumeItem(type,id,season,episode){
+    const token=resumeGate.begin(`${type}:${id}:${season||0}:${episode||0}`);if(token===null)return;
+    try{return await resumeItemWork(type,id,season,episode,token);}finally{resumeGate.complete(token);}
+  }
+  async function resumeItemWork(type, id, season, episode, token) {
+    const route = currentRoute;
+    try {
+      const saved = Store.getResume(type, id, season, episode);
+      if(saved&&['archive','jellyfin'].includes(saved.kind)){
+        const detail=saved.kind==='archive'?await API.archiveDetail(id):await API.jellyfinDetail(id);
+        const result=await API.sourcesFor(detail);if((currentRoute!==route||!resumeGate.current(token)))return;
+        const selected=result.sources[0];if(selected)return playVerified({type,id,title:detail.title,poster:detail.poster,kind:'stream',mediaKind:saved.kind,url:selected.url,urls:result.allSources,resumeDirect:true});
+      }
+      await API.loadCatalogs(Store.settings.catalogUrls);
+      if(!resumeGate.current(token)||currentRoute!==route)return;
+      const item = API.findCatalogItem(type, id);
+      if (item?.type === 'tv') {
+        const listing=await API.episodesFor(item);item.raw={...item.raw,episodes:listing.episodes};
+        const episodes = (item.raw.episodes || []).filter(ep => Number(ep.season) === season);
+        const result=await API.sourcesFor({...item,season,episode});
+        const sources=result.allSources;
+        if ((currentRoute !== route||!resumeGate.current(token))) return;
+        if (sources.length) return openEpisode(item, season, episode, sources[0].url, sources[0].name, episodes,true);
+      }
+      if ((currentRoute !== route||!resumeGate.current(token))) return;
+      if(type==='movie'){
+        const detail=item||await API.movieDetail(id);
+        if(!detail){go('movie',{id});return;}
+        const result=await API.sourcesFor(detail);
+        if((currentRoute!==route||!resumeGate.current(token)))return;
+        const selected=MoviePlusCore.choosePlaybackSource(result,saved?.source);
+        if(selected)return playVerified({type,id,title:detail.title,poster:detail.poster,kind:'stream',url:selected.url,urls:result.allSources,resumeDirect:true});
+        toast(CatalogSources.availability.message(result));
+        go(item?'catalog':'movie',{id,catalogUrl:item?.catalogUrl});return;
+      }
+      if (saved?.source) return Player.open({ type, id, title: saved.title, poster: saved.poster, kind: saved.kind || 'stream', url: saved.source, season, episode });
+      toast('Abre el título y elige una fuente para continuar');
+      if (item) go('catalog', { id, catalogUrl: item.catalogUrl }); else go(type === 'tv' ? 'tv' : 'movie', { id });
+    } catch (error) { toast('No se pudo reanudar: ' + publicMessage(error.message)); }
+  }
+
+  function wireCarouselArrows() {
+    // Navegación con rueda horizontal (optimización de carrusel)
+    $$('.row-scroll').forEach((row) => {
+      row.addEventListener('wheel', (e) => {
+        if (!e.shiftKey) return;
+        if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+          row.scrollLeft += e.deltaY;
+          e.preventDefault();
+        }
+      }, { passive: false });
+    });
+  }
+
+  function genreSection() {
+    return `<div class="search-history" id="genreChips" role="group" aria-label="Géneros">${MoviePlusCore.GENRES.map(genre=>`<button data-genre-id="${genre.id}" aria-pressed="false">${esc(genre.label)}</button>`).join('')}</div>
+      <div id="genreResults"></div>`;
+  }
+
+  async function loadGenre(genreId) {
+    const route=currentRoute;
+    route.params.genre=genreId;
+    const box = $('#genreResults');
+    if (!box) return;
+    box.innerHTML = '<div class="row-scroll">' + '<div class="poster skeleton"></div>'.repeat(8) + '</div>';
+    const request = ++genreRequest;
+    $$('#genreChips button').forEach(button => { const selected = Number(button.dataset.genreId) === genreId; button.classList.toggle('sel', selected); button.setAttribute('aria-pressed', String(selected)); });
+    const types=homeFilter==='all'?['movie','tv']:[homeFilter];
+    const plans=types.map(type=>({type,...MoviePlusCore.genreRequest(genreId,type)}));
+    const batches=await Promise.allSettled(plans.map(plan=>plan.id===null?Promise.resolve([]):API.byGenre(plan.type,plan.id,1)));
+    if (request !== genreRequest || currentRoute!==route || !box.isConnected) return;
+    const items=MoviePlusCore.orderItems(batches.flatMap((batch,index)=>batch.status==='fulfilled'?batch.value.filter(item=>item.type===plans[index].type).slice(0,14):[]),route.params.sort||'year');
+    const notices=plans.map(plan=>plan.notice).filter(Boolean);
+    const failures=batches.filter(batch=>batch.status==='rejected');
+    if(failures.length)notices.push('No se pudieron consultar todas las fuentes. Puedes volver a elegir el género para reintentar.');
+    box.innerHTML = `<div class="row-head"><h2>Resultados de ${esc(MoviePlusCore.GENRES.find(genre=>genre.id===genreId).label)}</h2></div>`+
+      (notices.length?`<p class="source-notice" role="status">${esc(notices.join(' '))}</p>`:'')+
+      (items.length?`<div class="grid">${items.map(it=>posterCard(it)).join('')}</div>`:MoviePlusUI.emptyMessage(failures.length?'No se pudo completar la consulta':'Sin títulos para este filtro',notices.length?'':'Prueba otro género o tipo de título.'));
+    wirePosters();
+  }
+
+  /* ============================ Buscar ============================ */
+  async function renderSearch(params = {}) {
+    const route=currentRoute;
+    content().innerHTML = `
+      <div class="view search-view">
+        <header class="page-heading sr-only"><h1>Buscar</h1></header>
+        <div class="search-bar">
+          <svg class="icon" aria-hidden="true"><use href="#i-search"/></svg>
+          <input id="searchInput" type="search" enterkeyhint="search" aria-label="Buscar películas, series o personas" placeholder="Buscar películas, series o personas…" autofocus />
+          <button type="button" class="btn-ghost search-clear hidden" id="searchClear" aria-label="Limpiar búsqueda" title="Limpiar búsqueda">×</button>
+          ${Platform.voiceSearchAvailable?`<button type="button" class="btn-ghost search-voice" id="searchVoice" aria-label="Buscar por voz" title="Buscar por voz">${icon('mic')}</button>`:''}
+          <select id="searchMode" aria-label="Tipo de búsqueda">
+            <option value="multi">Todo</option>
+            <option value="title">Título</option>
+            <option value="person">Persona</option>
+            <option value="tmdbId">TMDb ID</option>
+          </select>
+        </div>
+        <div class="search-history" id="searchHist"></div>
+        <div id="searchResults"></div>
+      </div>`;
+
+    const input = $('#searchInput');
+    const clearBtn = $('#searchClear');
+    const modeSel = $('#searchMode');
+    const voiceButton=$('#searchVoice');
+    if(voiceButton)voiceButton.onclick=async()=>{
+      if(voiceButton.disabled)return;
+      voiceButton.disabled=true;voiceButton.setAttribute('aria-busy','true');
+      try{
+        const result=await Platform.voiceSearch(Store.settings.language);
+        if(currentRoute!==route||!document.contains(input))return;
+        if(result.cancelled)return;
+        if(result.error){toast(result.error);return;}
+        if(result.text){input.value=result.text;clearTimeout(debounce);syncClearBtn();runSearch(true);}
+      }catch(error){if(currentRoute===route)toast(publicMessage(error.message)||'No se pudo abrir el dictado. Usa el teclado.');}
+      finally{voiceButton.disabled=false;voiceButton.removeAttribute('aria-busy');if(document.contains(voiceButton))voiceButton.focus({preventScroll:true});}
+    };
+    if (params.mode) modeSel.value = params.mode;
+    renderSearchHistory();
+    const syncClearBtn = () => {
+      const hasText = Boolean(input.value.trim().length);
+      if (clearBtn) clearBtn.classList.toggle('hidden', !input.value.length);
+      $('#searchHist')?.classList?.toggle?.('hidden', hasText);
+      syncTopbarSearch(input.value);
+    };
+
+    let debounce = null;
+    input.addEventListener('input', () => {
+      syncClearBtn();
+      clearTimeout(debounce);
+      if (!input.value.trim()) {
+        currentRoute.params = { q: '', mode: modeSel.value };
+        renderSearchSuggestions();
+        return;
+      }
+      debounce = setTimeout(() => runSearch(), API.SEARCH_DEBOUNCE_MS);
+    });
+    if (clearBtn) {
+      clearBtn.addEventListener('click', () => {
+        clearTimeout(debounce);
+        input.value = '';
+        syncClearBtn();
+        currentRoute.params = { q: '', mode: modeSel.value };
+        renderSearchSuggestions();
+        input.focus();
+      });
+    }
+    modeSel.addEventListener('change',()=>runSearch());
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') runSearch(true); });
+
+    if (params.q) { input.value = params.q; syncClearBtn(); return runSearch(); }
+    syncClearBtn();
+    renderSearchSuggestions();
+  }
+
+  async function renderSearchSuggestions() {
+    const route = currentRoute;
+    const box = $('#searchResults');
+    if (!box) return;
+    try {
+      const cats = await API.loadCatalogs(Store.settings.catalogUrls).catch(() => ({ items: [] }));
+      if (currentRoute !== route || currentView !== 'search' || $('#searchInput')?.value.trim()) return;
+      const items = (cats.items || []).slice(0, 16);
+      if (items.length) {
+        box.innerHTML = `<div class="row-head"><h2>Recientes en catálogo</h2></div><div class="grid">${items.map(it => posterCard(it)).join('')}</div>`;
+        wirePosters();
+      } else {
+        box.innerHTML = '';
+      }
+    } catch {
+      if (box && !$('#searchInput')?.value.trim()) box.innerHTML = '';
+    }
+  }
+
+  function renderSearchHistory() {
+    const box = $('#searchHist');
+    const hist = Store.searchHistory.slice(0, 8); // SEARCH_HISTORY_VISIBLE_LIMIT
+    box.innerHTML = (hist.length ? '<span style="color:var(--text-secondary);font-size:12px;align-self:center">Recientes:</span>' : '') +
+      hist.map((h) => `<button data-q="${esc(h)}"><svg class="icon" aria-hidden="true"><use href="#i-clock"/></svg>${esc(h)}</button>`).join('') +
+      (hist.length ? '<button data-clear="1" aria-label="Borrar búsquedas recientes" title="Borrar búsquedas recientes">×</button>' : '');
+    $$('button[data-q]', box).forEach((b) => b.addEventListener('click', () => {
+      $('#searchInput').value = b.dataset.q;
+      $('#searchClear')?.classList.toggle('hidden', !b.dataset.q);
+      syncTopbarSearch(b.dataset.q);
+      runSearch();
+    }));
+    const clr = $('button[data-clear]', box);
+    if (clr) clr.addEventListener('click', () => { Store.clearSearchHistory(); renderSearchHistory(); });
+  }
+
+  async function runSearch(commit = false) {
+    if(currentView!=='search'||!$('#searchInput')||!$('#searchMode'))return;
+    const route=currentRoute,request=++searchRequest;
+    const q = $('#searchInput').value.trim();
+    $('#searchClear')?.classList.toggle('hidden', !q.length);
+    syncTopbarSearch(q);
+    const mode = $('#searchMode').value;
+    currentRoute.params = { q, mode,shown:route.params.q===q&&route.params.mode===mode?route.params.shown||96:96 };
+    const box = $('#searchResults');
+    if (!q.length) {
+      renderSearchSuggestions();
+      return;
+    }
+    if (q.length < API.SEARCH_MIN_CHARS) {
+      box.innerHTML = `<div class="empty-state"><div class="big">🔍</div><div>Escribe al menos ${API.SEARCH_MIN_CHARS} caracteres</div></div>`;
+      return;
+    }
+    box.innerHTML = '<div class="grid">' + '<div class="poster skeleton"></div>'.repeat(8) + '</div>';
+    try {
+      const { results, people, notice } = await API.search(q, mode);
+      if (currentRoute!==route||request!==searchRequest || $('#searchInput')?.value.trim() !== q || $('#searchMode')?.value !== mode) return;
+      if (commit) { Store.addSearch(q); renderSearchHistory(); }
+      const cleanNotice = notice ? publicMessage(notice).replace(/\bnebula:\s*/gi, '') : '';
+      let html = cleanNotice ? `<p class="source-notice">${esc(cleanNotice)}</p>` : '';
+      if (people.length) {
+        html += `<div class="row-head"><h2>Personas</h2></div><div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(220px,1fr))">
+          ${people.slice(0, 10).map((p) => `
+            <div class="person-result" role="button" tabindex="0" data-person="${p.id}" data-name="${esc(p.name)}">
+              ${p.img ? `<img alt="" src="${esc(p.img)}" loading="lazy"/>` : '<div class="ph" style="width:52px;height:52px;border-radius:50%;background:var(--panel)"></div>'}
+              <div><div style="font-weight:600">${esc(p.name)}</div><div style="color:var(--muted);font-size:11.5px">${esc(p.known || '')}</div></div>
+            </div>`).join('')}</div>`;
+      }
+      if (results.length) {
+        const limit=Math.max(96,Number(route.params.shown)||96);
+        html += `<div class="row-head"><h2>Resultados</h2></div>
+          <div class="grid" id="searchGrid">${results.slice(0, limit).map((it) => posterCard(it)).join('')}</div>${results.length > limit ? '<button class="btn" id="searchMore">Ver más resultados</button>' : ''}`;
+      }
+      if (!results.length && !people.length) {
+        html += MoviePlusUI.emptyMessage(`Sin resultados para “${q}”`,mode==='tmdbId'?'Usa solo el número completo de TMDB. Una película y una serie pueden compartir número; se muestran por separado.':'Prueba otro título o cambia el tipo de búsqueda.');
+      }
+      box.innerHTML = html;
+      let shown = Math.max(96,Number(route.params.shown)||96);
+      if ($('#searchMore')) $('#searchMore').onclick = () => {
+        $('#searchGrid').insertAdjacentHTML('beforeend', results.slice(shown, shown + 96).map(item => posterCard(item)).join(''));
+        shown += 96;
+        route.params.shown=shown;
+        if (shown >= results.length) $('#searchMore').remove();
+        wirePosters();
+      };
+      wirePosters();
+      $$('div[data-person]', box).forEach(d => {
+        d.onclick = () => go('person', { id: d.dataset.person, name: d.dataset.name });
+        d.onkeydown = event => { if (['Enter', ' '].includes(event.key)) { event.preventDefault(); d.click(); } };
+      });
+    } catch (e) {
+      if(currentRoute!==route||request!==searchRequest)return;
+      box.innerHTML = `<div class="empty-state"><div class="big">⚠️</div><div>Error: ${esc(e.message)}</div></div>`;
+    }
+  }
+
+  async function renderPerson(params) {
+    const route = currentRoute;
+    content().innerHTML = '<div class="view"><header class="page-heading"><h1>' + esc(params.name || 'Filmografía') + '</h1><p>Películas y series en las que participa.</p></header><div id="personTitles">Cargando títulos…</div></div>';
+    try {
+      const items = await API.personTitles(params.id);
+      if (currentRoute !== route) return;
+      $('#personTitles').innerHTML = items.length ? '<div class="grid">' + items.map(item => posterCard(item)).join('') + '</div>' : emptyState('🎬', 'No hay títulos disponibles para esta persona.');
+      wirePosters();
+    } catch (error) { if (currentRoute === route) $('#personTitles').textContent = 'No se pudo cargar la filmografía: ' + publicMessage(error.message); }
+  }
+
+  /* ============================ Detalle ============================ */
+  function sourceRank(source) {
+    const label = String(source?.name || '').toUpperCase();
+    const penalty = /\bTRIAL\b|\bPRUEBA\b/.test(label) ? -5000 : 0;
+    const matchK = label.match(/\b([248])\s*K\b/);
+    if (matchK) return penalty + Number(matchK[1]) * 540;
+    const matchP = label.match(/\b([0-9]{3,4})\s*P?\b/);
+    return penalty + (matchP ? Number(matchP[1]) : 0);
+  }
+
+  function listPlayableSources(sources) {
+    const seenUrls = new Set();
+    const valid = [];
+    for (const src of (sources || [])) {
+      if (!src || !src.url) continue;
+      const u = String(src.url).trim();
+      if (!u || seenUrls.has(u)) continue;
+      seenUrls.add(u);
+      valid.push({ ...src, url: u, name: String(src.name || 'Original').replace(/\b(?:movieplus|xuper)\b/gi,'').replace(/^[\s·|:—–-]+|[\s·|:—–-]+$/g,'') || 'Original', providerId: src.providerId || ((u.startsWith('nebula://') || /nebula/i.test(u) || src.size === 'Fuente adicional') ? 'nebula' : 'movieplus') });
+    }
+    const salud = (source) => {
+    const historial = (Store.settings.providerHealth || {})[source.providerId] || null;
+    const total = historial ? (historial.ok || 0) + (historial.dead || 0) : 0;
+    return total ? (historial.ok || 0) / total : 0.5;
+  };
+  valid.sort((a, b) => (sourceRank(b) - sourceRank(a)) || (salud(b) - salud(a)));
+    const counts = new Map();
+    for (const s of valid) {
+      const key = s.name.toUpperCase();
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    const indices = new Map();
+    return valid.map((s) => {
+      const key = s.name.toUpperCase();
+      if ((counts.get(key) || 0) <= 1) return s;
+      const idx = (indices.get(key) || 0) + 1;
+      indices.set(key, idx);
+      return { ...s, name: `${s.name} · Opción ${idx}` };
+    });
+  }
+
+  function sourceStatusMarkup(qualities,additional) {
+    const providers=[...(additional.providers||[additional])];
+    const state=CatalogSources.availability.aggregate([{providerId:'catalog',state:'unknown',sources:qualities},...providers]);
+    const offline=providers.filter(provider=>provider.state==='not_connected');
+    if(qualities.length && !state.warnings.length)return '';
+    if(qualities.length){
+      const who='Una fuente';
+      return `<span class="chip chip-muted" role="status" data-source-state="partial">${esc((who||'Una fuente')+' no respondió; las demás están disponibles.')}</span>`;
+    }
+    if(!state.warnings.length && offline.length){
+      return `<span class="chip chip-muted" role="status" data-source-state="not_connected">${esc('La fuente adicional no está conectada. Reconéctala en Ajustes para ver más opciones.')}</span>`;
+    }
+    const text=CatalogSources.availability.message(state.warnings[0]||state);
+    return `<span class="chip" role="status" data-source-state="${state.state}">${esc(publicMessage(text))}</span>${state.warnings.length?'<button class="btn" id="retrySources">Reintentar fuentes</button>':''}`;
+  }
+  async function renderDetail(type, id) {
+    const route=currentRoute;
+    content().innerHTML = `
+      <div class="view">
+        <div class="detail-hero"><div class="backdrop"></div><div class="content">
+          <div class="detail-poster skeleton" style="height:285px"></div>
+          <div class="d-info"><div class="d-title skeleton" style="height:30px;width:60%"></div><p role="status" data-source-state="loading">Consultando la ficha y sus fuentes…</p></div>
+        </div></div>
+      </div>`;
+    try {
+      const detail = String(id).startsWith('nebula:') ? await API.nebulaDetail(id) : type === 'tv' ? await API.seriesDetail(id) : await API.movieDetail(id);
+      if(currentRoute!==route)return;
+      if (!detail) { content().innerHTML = '<div class="view"><div class="empty-state"><div class="big">🚫</div><div>No encontrado</div></div></div>'; return; }
+      await API.loadCatalogs(Store.settings.catalogUrls);
+      if(currentRoute!==route)return;
+      let catItem = API.findCatalogItem(type, id);
+      if(type==='tv'){
+        const result=await API.episodesFor(detail);
+        catItem={...(catItem||detail),raw:{...catItem?.raw,episodes:result.episodes},episodeError:result.warnings[0]?.error};
+      }
+      const wp = String(id).startsWith('nebula:') ? null : await API.watchProviders(type, id).catch(() => null);
+
+      const watchBox = wp && wp.groups.length ? `
+        <details class="watch-box">
+          <summary class="watch-head"><span class="watch-label">Dónde verla legalmente (${esc(wp.region)})</span></summary>
+          <div class="watch-groups">
+            ${wp.groups.map(([label, arr]) => `
+              <div class="watch-group">
+                <span class="watch-group-label">${esc(label)}</span>
+                <div class="watch-chips">
+                  ${arr.slice(0, 4).map((p) => `
+                    <button class="watch-chip" data-watch="1" title="Ver opciones en TMDB/JustWatch">
+                      ${p.logo_path ? `<img alt="" src="${esc('https://image.tmdb.org/t/p/w45' + p.logo_path)}"/>` : ''}
+                      <span>${esc(p.provider_name)}</span>
+                    </button>`).join('')}
+                </div>
+              </div>
+            `).join('')}
+          </div>
+          <div class="watch-links">
+            <button class="watch-chip watch-link-btn" data-justwatch="1">🔍 Buscar en JustWatch</button>
+            ${wp.link ? '<button class="watch-chip watch-link-btn" data-watch="1">🌐 Todas las ofertas</button>' : ''}
+          </div>
+        </details>` : `
+        <details class="watch-box">
+          <summary class="watch-head"><span class="watch-label">Sin ofertas de streaming registradas en tu región</span></summary>
+          <div class="watch-links"><button class="watch-chip watch-link-btn" data-justwatch="1"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg>Buscar en JustWatch</button></div>
+        </details>`;
+
+      const additional = type==='movie' ? await API.sourcesFor(detail) : {sources:[]};
+      if(currentRoute!==route)return;
+      const allQualities=type==='movie'?listPlayableSources(additional.allSources):[];
+      const qualities = allQualities;
+      const fav = Store.isFavorite(type, id);
+      const seriesResume = type === 'tv' ? Store.resumeList.find(r => r.type === 'tv' && String(r.id) === String(detail.id) && r.season && r.episode) : null;
+      const hasMovieResume = type === 'movie' && !!Store.getResume('movie', detail.id);
+      const firstPlayableEp = type === 'tv' ? (catItem?.raw?.episodes || []).find(ep => API.parseSources(ep.urls, ep.resolutions).some(s => s.url)) : null;
+      $('#tbTitle').textContent = detail.title || (type === 'tv' ? 'Serie' : 'Película');
+
+      content().innerHTML = `
+        <div class="view detail-view">
+          <div class="detail-tabs" role="tablist" aria-label="Secciones de la ficha">
+            <button type="button" class="detail-tab active" data-dtab="summary">Resumen</button>
+            ${type === 'tv' ? '<button type="button" class="detail-tab" data-dtab="seasons">Temporadas</button>' : ''}
+          </div>
+          <div class="detail-hero">
+            <div class="backdrop" style="background-image:url('${esc(detail.backdrop || detail.poster || '')}')"></div>
+            <div class="content">
+              <div class="detail-poster">
+                ${detail.poster ? `<img alt="" src="${esc(detail.poster)}"/>` : `<div class="detail-poster-ph">${icon('film')}</div>`}
+              </div>
+              <div class="d-info">
+                <h1 class="d-title">${esc(detail.title)} <span class="d-year">${detail.year ? `(${esc(String(detail.year).slice(0,4))})` : ''}</span></h1>
+                <div class="d-meta">
+                  <span class="chip chip-accent">${type === 'tv' ? 'Serie' : 'Película'}</span>
+                  ${detail.year ? `<span class="chip">${esc(String(detail.year).slice(0,4))}</span>` : ''}
+                  ${MoviePlusUI.ratingChip(detail.rating)}
+                  ${detail.runtime ? `<span class="chip">${detail.runtime} min</span>` : ''}
+                </div>
+                <div class="d-genres">${(detail.genres || []).map((g) => `<span>${esc(g)}</span>`).join('')}</div>
+                <div class="d-overview">${esc(detail.overview) || '<i>Sin sinopsis.</i>'}</div>
+                <div class="d-actions">
+                  ${qualities.length ? `
+                    <button class="btn primary" id="btnPlaySel"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg>Reproducir</button>
+                    <button class="btn" id="btnDownloadSel"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg>Descargar</button>` : seriesResume ? `<button class="btn primary" id="btnResumeSeries"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg>Continuar T${seriesResume.season}·E${seriesResume.episode}</button>` : firstPlayableEp ? `<button class="btn primary" id="btnPlayFirstEp"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg>Reproducir T${firstPlayableEp.season}·E${firstPlayableEp.episode}</button>` : ''}
+                  ${detail.trailer ? '<button class="btn" id="btnTrailer"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg>Tráiler</button>' : ''}
+                  ${type==='movie'?sourceStatusMarkup(qualities,additional):!qualities.length&&!seriesResume&&!firstPlayableEp?'<span class="chip">Elige un capítulo para ver sus fuentes y reproducir</span>':''}
+                  <button class="btn ${fav ? 'danger-ghost' : ''}" id="btnFav" aria-pressed="${fav}">${fav ? icon('heart')+'En Mi lista' : icon('heart')+'Mi lista'}</button>
+                  <details class="d-more"><summary class="btn d-more-btn" aria-label="Más acciones">⋯</summary><div class="d-more-panel"><summary class="btn d-more-btn" aria-label="Más acciones">⋯</summary><div class="d-more-panel">
+          ${seriesResume || hasMovieResume ? '<button class="btn" id="btnRemoveResume">Quitar de continuar</button>' : ''}
+          <button class="btn" id="btnShare"><svg class="icon" aria-hidden="true"><use href="#i-link"/></svg>Copiar enlace TMDB</button>
+        </div></details>
+                </div>
+                ${qualities.length ? qualityPicker(qualities) : ''}
+                ${watchBox}
+              </div>
+            </div>
+          </div>
+          ${type === 'tv' ? `<div class="row-head" id="seasonsHead"><h2>Temporadas y capítulos</h2></div><div id="seasonsBox"></div>` : ''}
+          ${detail.cast && detail.cast.length ? `
+            <div class="row-head"><h2>Reparto</h2></div>
+            <div class="cast-row">${detail.cast.map((c) => `
+              <div class="cast-card">${c.img ? `<img alt="" src="${esc(c.img)}" loading="lazy"/>` : '<div class="ph" style="width:74px;height:74px;border-radius:50%;background:var(--panel);margin:0 auto 6px"></div>'}
+                <div class="c-name">${esc(c.name)}</div><div class="c-role">${esc(c.role || '')}</div></div>`).join('')}</div>` : ''}
+        </div>`;
+
+      $$('.detail-tab').forEach(tabBtn => tabBtn.addEventListener('click', () => {
+        $$('.detail-tab').forEach(b => b.classList.toggle('active', b === tabBtn));
+        if (tabBtn.dataset.dtab === 'seasons') $('#seasonsHead')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        else content().scrollTo({ top: 0, behavior: 'smooth' });
+      }));
+
+      /* Acciones */
+      if($('#retrySources'))$('#retrySources').onclick=()=>{API.invalidate();renderDetail(type,id);};
+      const playUrlFor = () => {
+        const sel = selectedQuality();
+        return sel ? sel.url : (catItem && catItem.urls[0]) || detail.trailer;
+      };
+      if ($('#btnResumeSeries') && seriesResume) {
+        $('#btnResumeSeries').onclick = () => resumeItem('tv', detail.id, Number(seriesResume.season), Number(seriesResume.episode));
+      }
+      if ($('#btnPlayFirstEp') && firstPlayableEp) {
+        $('#btnPlayFirstEp').onclick = () => {
+          const sNum = Number(firstPlayableEp.season);
+          const eNum = Number(firstPlayableEp.episode);
+          const seasonEps = (catItem?.raw?.episodes || []).filter(ep => Number(ep.season) === sNum);
+          const urls = pickEpisodeUrls(seasonEps, eNum);
+          if (urls.length) openEpisode(detail, sNum, eNum, urls[0].url, urls[0].name, seasonEps);
+        };
+      }
+      if ($('#btnRemoveResume')) {
+        $('#btnRemoveResume').onclick = () => {
+          Store.removeResume(type, detail.id);
+          $('#btnRemoveResume').remove();
+          toast('Quitado de continuar viendo');
+        };
+      }
+      const savedMovieResume = type === 'movie' ? Store.getResume('movie', detail.id) : null;
+      if ($('#btnPlaySel') && savedMovieResume && savedMovieResume.position > 20) {
+        const restante = savedMovieResume.duration ? Math.max(1, Math.round((savedMovieResume.duration - savedMovieResume.position) / 60)) : 0;
+        $('#btnPlaySel').innerHTML = '<svg class="icon" aria-hidden="true"><use href="#i-play"/></svg>Continuar' + (restante ? ' · quedan ' + restante + ' min' : '');
+      }
+      if ($('#btnPlaySel')) {
+        $('#btnPlaySel').onclick = () => {
+          const sel = selectedQuality() || qualities[0];
+          if (!sel?.url) { toast('No hay fuente de video disponible'); return; }
+          playVerified({ type, id: detail.id, title: detail.title, poster: detail.poster,
+            kind: 'stream', url: sel.url, urls: allQualities });
+        };
+      }
+      if ($('#btnTrailer')) $('#btnTrailer').onclick = () => {
+        Player.open({ type, id: detail.id, title: `${detail.title} — Tráiler`, poster: detail.poster, kind: 'trailer', url: detail.trailer });
+      };
+      if ($('#btnDownloadSel')) $('#btnDownloadSel').onclick = () => {
+        const sel = selectedQuality() || qualities[0];
+        if (!sel || !sel.url) { toast('No hay URL a descargar, prueba con otra calidad.'); return; }
+        startDownloadFlow({ url: sel.url, filename: `${detail.title} ${sel.name}.mp4`, title: detail.title, quality: sel.name, size: sel.size });
+      };
+      $('#btnFav').onclick = () => {
+        const on = Store.toggleFavorite({ type, id: detail.id, title: detail.title, poster: detail.poster, year: detail.year,rating:detail.rating });
+        $('#btnFav').innerHTML = icon('heart') + (on ? 'En Mi lista' : 'Mi lista');
+        $('#btnFav').setAttribute('aria-pressed',String(on));
+        $('#btnFav').className = `btn ${on ? 'danger-ghost' : ''}`;
+        toast(on ? 'Agregado a Mi Lista' : 'Quitado de Mi Lista');
+      };
+      $('#btnShare').onclick = () => {
+        Platform.clipboardWrite(`https://www.themoviedb.org/${type === 'tv' ? 'tv' : 'movie'}/${id}`);
+        toast('URL copiada');
+      };
+      /* Enlaces a proveedores legales */
+      $$('button[data-watch]').forEach((b) => b.addEventListener('click', () => {
+        if (wp && wp.link) Platform.openUrl(wp.link);
+      }));
+      $$('button[data-justwatch]').forEach((b) => b.addEventListener('click', () => {
+        Platform.openUrl(`https://www.justwatch.com/es/buscar?q=${encodeURIComponent(detail.title)}`);
+      }));
+      wireQualityPicker(qualities);
+    verifyQualityBox(qualities);
+
+      if (type === 'tv') renderSeasons(detail, catItem);
+    } catch (e) {
+      if(currentRoute!==route)return;
+      content().innerHTML = `<div class="view"><div class="empty-state"><div class="big">⚠️</div><div>Error: ${esc(e.message)}</div></div></div>`;
+    }
+  }
+
+  function qualityPicker(qualities) {
+    if(tvInterface())return '';
+    return `
+      <div class="row-head" style="margin-top:6px"><h2>Fuentes disponibles (${qualities.length})</h2></div>
+      <div class="qualities" id="qualityBox">
+        ${qualities.map((q, i) => `
+          <div class="quality-item ${i === 0 ? 'sel' : ''}" role="radio" tabindex="0" aria-checked="${i === 0}" data-url="${esc(q.url || '')}" data-name="${esc(q.name)}" data-size="${esc(q.size || '')}">
+            <div class="q-name">${esc(q.name)}</div>
+            <div class="q-size">${q.size ? esc(q.size) : (q.url ? 'Disponible' : 'No disponible')}</div>
+          </div>`).join('')}
+      </div>`;
+  }
+
+  let selectedQualityRef = null;
+  let qualityUserPicked = false;
+  function selectQualityCard(el) {
+    if (!el) return;
+    $$('#qualityBox .quality-item').forEach((x) => { x.classList.remove('sel'); x.setAttribute('aria-checked', 'false'); });
+    el.classList.add('sel');
+    el.setAttribute('aria-checked', 'true');
+    selectedQualityRef = { name: el.dataset.name, size: el.dataset.size, url: el.dataset.url };
+  }
+
+  function wireQualityPicker(qualities) {
+    qualityUserPicked = false;
+    selectedQualityRef = qualities && qualities.length ? qualities[0] : null;
+    if(tvInterface())return;
+    setTimeout(() => {
+      document.querySelectorAll('#qualityBox .quality-item[data-state="checking"]').forEach((card) => {
+        card.dataset.state = 'unknown';
+        card.classList.add('unconfirmed');
+        const size = card.querySelector('.q-size');
+        if (size) size.textContent = card.dataset.size ? card.dataset.size + ' · sin confirmar' : 'Sin confirmar';
+      });
+      const head = document.querySelector('#qualityBox')?.parentElement?.querySelector('.row-head h2');
+      if (head) head.textContent = 'Fuentes disponibles (' + document.querySelectorAll('#qualityBox .quality-item:not(.dead)').length + ')';
+    }, 22000);
+    $$('#qualityBox .quality-item').forEach((el) => {
+      el.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); el.click(); } });
+      el.addEventListener('click', () => {
+        $$('#qualityBox .quality-item').forEach((x) => { x.classList.remove('sel'); x.setAttribute('aria-checked', 'false'); });
+        el.classList.add('sel');
+        el.setAttribute('aria-checked', 'true');
+        selectedQualityRef = { name: el.dataset.name, size: el.dataset.size, url: el.dataset.url };
+        qualityUserPicked = true;
+      });
+    });
+  }
+  function selectedQuality() { return selectedQualityRef; }
+
+  function episodeActionsMarkup(qualities, watched, canSkip = true, emptyMessage = '') {
+    const top = listPlayableSources(qualities);
+    if (!top.length) {
+      return `<div class="ep-actions"><span class="ep-unavailable">${esc(emptyMessage)}</span></div>`;
+    }
+    const first = top[0];
+    const playLabel = !tvInterface()&&first.name && first.name !== 'Original' ? `Reproducir · ${first.name}` : 'Reproducir';
+    const selectHtml = !tvInterface()&&top.length > 1
+      ? `<select class="ep-quality-select" aria-label="Seleccionar calidad del episodio">${top.map((q, idx) => `<option value="${idx}" data-url="${esc(q.url)}" data-name="${esc(q.name || '')}">${esc(q.name || `Opción ${idx + 1}`)}</option>`).join('')}</select>`
+      : '';
+    return `<div class="ep-actions">
+      <button class="${selectHtml ? '' : 'ep-play-full'}" data-play="1" data-url="${esc(first.url)}" data-name="${esc(first.name || '')}"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg><span class="ep-play-label">${esc(playLabel)}</span></button>
+      ${selectHtml}
+      <button data-dl="1" data-url="${esc(first.url)}" data-name="${esc(first.name || '')}"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg>Descargar</button>
+      ${canSkip ? `<button data-skip="1"><svg class="icon" aria-hidden="true"><use href="#i-clock"/></svg>Salto de intro</button>` : ''}
+      <button data-mark="1">${watched ? 'Quitar visto' : 'Marcar visto'}</button>
+    </div>`;
+  }
+
+  function wireEpisodeQualitySelect(row) {
+    const sel = row.querySelector('.ep-quality-select');
+    if (!sel) return;
+    sel.addEventListener('click', ev => ev.stopPropagation());
+    sel.addEventListener('change', ev => {
+      ev.stopPropagation();
+      const opt = sel.selectedOptions[0];
+      if (!opt) return;
+      const url = opt.dataset.url || '';
+      const name = opt.dataset.name || '';
+      const playBtn = row.querySelector('button[data-play]');
+      const dlBtn = row.querySelector('button[data-dl]');
+      if (playBtn) {
+        playBtn.dataset.url = url;
+        playBtn.dataset.name = name;
+        const lbl = playBtn.querySelector('.ep-play-label');
+        if (lbl) lbl.textContent = name && name !== 'Original' ? `Reproducir · ${name}` : 'Reproducir';
+      }
+      if (dlBtn) {
+        dlBtn.dataset.url = url;
+        dlBtn.dataset.name = name;
+      }
+    });
+  }
+
+  async function renderSeasons(detail, catItem) {
+    const route=currentRoute;
+    let sequence=0;
+    const box = $('#seasonsBox');
+    if (!box) return;
+    const seasonMap=new Map((detail.seasons||[]).map(season=>[season.season,season]));
+    for(const episode of catItem?.raw?.episodes||[])if(!seasonMap.has(Number(episode.season)))seasonMap.set(Number(episode.season),{season:Number(episode.season),name:'Temporada '+episode.season});
+    const seasons=[...seasonMap.values()].sort((a,b)=>a.season-b.season);
+    if (!seasons.length) { box.innerHTML = '<div class="empty-state"><div>Episodios no disponibles.</div></div>'; return; }
+    const savedResume = Store.resumeList.find(r => r.type === 'tv' && String(r.id) === String(detail.id));
+    const initialSeason = seasons.find(s => Number(s.season) === Number(savedResume?.season))?.season ?? seasons[0].season;
+    box.innerHTML = `
+      <div class="seasons-tabs">${seasons.map((s) => `<button class="season-tab ${s.season === initialSeason ? 'active' : ''}" data-s="${s.season}">${esc(s.name || `T${s.season}`)}</button>`).join('')}</div>
+      <div class="episodes" id="epsBox"><div class="empty-state"><div>Cargando capítulos…</div></div></div>`;
+
+    const loadEps = async (season) => {
+      const request=++sequence;
+      const epsBox = $('#epsBox');
+      epsBox.innerHTML = '<div class="empty-state"><div>Cargando capítulos…</div></div>';
+      try {
+        const metadata = await API.seasonEpisodes(detail.id, season).catch(()=>[]);
+        if(currentRoute!==route || request!==sequence)return;
+        const catEpisodes = catItem && catItem.raw && Array.isArray(catItem.raw.episodes)
+          ? catItem.raw.episodes.filter((e) => Number(e.season) === Number(season)) : [];
+        const episodeMap=new Map(metadata.map(ep=>[Number(ep.episode),ep]));
+        for(const episode of catEpisodes)if(!episodeMap.has(Number(episode.episode)))episodeMap.set(Number(episode.episode),{...episode,name:episode.name||'Episodio '+episode.episode});
+        const eps=[...episodeMap.values()].sort((a,b)=>a.episode-b.episode);
+        if (!eps.length && !catEpisodes.length) { epsBox.innerHTML = '<div class="empty-state"><div>No hay capítulos para mostrar.</div></div>'; return; }
+
+        const emptyMsg = CatalogSources.availability.message({state:catItem?.episodeError?'temporary_error':catItem?'unavailable':'unknown'});
+        epsBox.innerHTML = eps.map((e) => {
+          const watched = Store.isEpisodeWatched('tv', detail.id, season, e.episode);
+          const epUrls = pickEpisodeUrls(catEpisodes, e.episode);
+          const resume = Store.getResume('tv', detail.id, season, e.episode);
+          const pct = resume && resume.duration ? Math.min(100, Math.round((resume.position / resume.duration) * 100)) : 0;
+          return `
+            <div class="episode" data-e="${e.episode}">
+              <div class="ep-still">
+                ${e.still ? `<img alt="" src="${esc(e.still)}" loading="lazy"/>` : `<div class="ph">${icon('film')}</div>`}
+                ${pct ? `<div class="ep-progress" style="width:${pct}%"></div>` : ''}
+              </div>
+              <div class="ep-body">
+                <div class="ep-meta">
+                  <div class="ep-num"><span class="ep-code">S${String(season).padStart(2, '0')}E${String(e.episode).padStart(2, '0')}</span> · T${season} · E${e.episode} ${watched ? '<span class="ep-watched-badge">✓ visto</span>' : ''}</div>
+                  <div class="ep-name">${esc(e.name)}</div>
+                  <div class="ep-over">${esc(e.overview) || '<i>Sin descripción.</i>'}</div>
+                </div>
+                ${episodeActionsMarkup(epUrls, watched, true, emptyMsg)}
+              </div>
+            </div>`;
+        }).join('');
+
+        $$('.episode', epsBox).forEach((el) => {
+          wireEpisodeCard(el);
+          wireEpisodeQualitySelect(el);
+          const epNum = Number(el.dataset.e);
+          const buttons = el.querySelectorAll('button');
+          buttons.forEach((b) => {
+            b.addEventListener('click', (ev) => {
+              ev.stopPropagation();
+              if (b.dataset.play) {
+                openEpisode(detail, season, epNum, b.dataset.url, b.dataset.name, catEpisodes);
+              } else if (b.dataset.dl) {
+                startDownloadFlow({ url: b.dataset.url, filename: `${detail.title} T${season}E${epNum} ${b.dataset.name}.mp4`, title: `${detail.title} T${season}E${epNum}`, quality: b.dataset.name });
+              } else if (b.dataset.mark) {
+                const on = Store.toggleWatchedEpisode('tv', detail.id, season, epNum);
+                toast(on ? 'Marcado como visto' : 'Quitar visto');
+                loadEps(season);
+              } else if (b.dataset.skip) {
+                editSkipTimes(detail.id, season, epNum);
+              }
+            });
+          });
+        });
+      } catch (e) {
+        if(currentRoute!==route || request!==sequence)return;
+        epsBox.innerHTML = `<div class="empty-state"><div>Error cargando capítulos: ${esc(e.message)}</div></div>`;
+      }
+    };
+
+    $$('.season-tab', box).forEach((t) => t.addEventListener('click', () => {
+      $$('.season-tab', box).forEach((x) => x.classList.remove('active'));
+      t.classList.add('active');
+      loadEps(Number(t.dataset.s));
+    }));
+    loadEps(initialSeason);
+  }
+
+  function pickEpisodeUrls(catEpisodes, epNum) {
+    const ep = catEpisodes.find((e) => Number(e.episode) === Number(epNum));
+    if (!ep) return [];
+    return listPlayableSources(API.parseSources(ep.urls, ep.resolutions));
+  }
+
+  function openEpisode(detail, season, episode, url, qualityName, catEpisodes,resumeDirect=false) {
+    const next = catEpisodes.find((e) => Number(e.episode) === Number(episode) + 1);
+    const baseTitle = String(detail.title || '').replace(/\s*—\s*T\d+·E\d+.*$/, '');
+    Player.open({
+      type: 'tv', id: detail.id,tmdbId:Number(detail.tmdbId)||Number(String(detail.canonicalId||detail.canonical||'').replace(/^(?:tmdb:)?(?:series|tv):/,''))||(/^\d+$/.test(String(detail.id))?Number(detail.id):0),isAnime:Number(detail.catalogType||detail.raw?.type)===3,imdbId:detail.external_ids?.imdb_id||detail.imdb_id||'',malId:Number(detail.malId||detail.mal_id)||0,
+      title: `${baseTitle} — T${season}·E${episode}${qualityName ? ' (' + qualityName + ')' : ''}`,
+      poster: detail.poster,
+      catalogUrl: detail.catalogUrl,
+      kind: 'stream', resumeDirect,
+      url,
+      urls: pickEpisodeUrls(catEpisodes, episode).map((q) => ({ name: q.name, url: q.url, size: q.size })),
+      season, episode,
+      nextEpisode: next ? {
+        label: `T${season}·E${next.episode}${next.name ? ' · ' + next.name : ''}`,
+        open: () => {
+          const urls = pickEpisodeUrls(catEpisodes, next.episode);
+          openEpisode(detail, season, next.episode, urls[0] && urls[0].url, urls[0] && urls[0].name, catEpisodes);
+        },
+      } : null,
+    });
+  }
+
+  function editSkipTimes(id, season, episode) {
+    const sk = Store.getSkip('tv', id, season, episode) || { start: 0, end: 0 };
+    const field=(key,label,value)=>tvInterface()?`<div class="set-row"><span>${label}</span><div class="tv-number-stepper"><button class="btn" data-skip-step="${key}" data-delta="-5" aria-label="${label}: restar cinco segundos">−5 s</button><output id="${key}Label" aria-live="polite">${value}</output><button class="btn" data-skip-step="${key}" data-delta="5" aria-label="${label}: sumar cinco segundos">+5 s</button><input type="hidden" id="${key}" value="${value}"></div></div>`:`<div class="set-row"><label for="${key}">${label}</label><input type="number" id="${key}" min="0" value="${value}"></div>`;
+    showModal(`
+      <h2><svg class="icon" aria-hidden="true"><use href="#i-clock"/></svg>Salto de intro</h2>
+      <p>Marca el inicio y el final de este episodio. Es una marca manual, no una detección automática.</p>
+      ${field('skStart','Inicio (s)',sk.start)}
+      ${field('skEnd','Fin (s)',sk.end)}
+      <div class="m-actions"><button class="btn" id="skCancel">Cancelar</button><button class="btn primary" id="skSave">Guardar</button></div>
+    `, () => {
+      $$('#modalLayer [data-skip-step]').forEach(button=>button.onclick=()=>{const input=$('#'+button.dataset.skipStep);input.value=Math.max(0,Math.min(86400,Number(input.value)+Number(button.dataset.delta)));$('#'+input.id+'Label').textContent=input.value;});
+      $('#skSave').onclick = () => {
+        const start=Number($('#skStart').value)||0,end=Number($('#skEnd').value)||0;
+        if(!MoviePlusCore.introRange({start,end})){toast('Revisa el inicio y el final (máximo 5 minutos).');return;}
+        Store.setSkip('tv', id, season, episode, start, end);
+        toast('Salto de intro guardado');
+        closeModal();
+      };
+      $('#skCancel').onclick = closeModal;
+    });
+  }
+
+  /* ============================ Detalle de fuentes legales ============================ */
+  async function renderSourceDetail(kind, id) {
+    const route=currentRoute;
+    content().innerHTML = `
+      <div class="view">
+        <div class="detail-hero"><div class="content">
+          <div class="detail-poster skeleton" style="height:285px"></div>
+          <div class="d-info"><div class="d-title skeleton" style="height:30px;width:55%"></div></div>
+        </div></div>
+      </div>`;
+    try {
+      const d = kind === 'archive' ? await API.archiveDetail(id) : await API.jellyfinDetail(id);
+      if(d.type==='movie'){const result=await API.sourcesFor(d);d.sources=result.allSources;}
+      if(currentRoute!==route)return;
+      const fav = Store.isFavorite(d.type, d.id);
+      const subtitleChip = d.subtitles && d.subtitles.length
+        ? `<span class="chip">💬 ${d.subtitles.length} subtítulo(s) incluidos</span>` : '';
+      content().innerHTML = `
+        <div class="view">
+          <div class="detail-hero">
+            <div class="backdrop" style="background-image:url('${esc(d.backdrop || d.poster || '')}')"></div>
+            <div class="content">
+              <div class="detail-poster">${d.poster ? `<img alt="" src="${esc(d.poster)}"/>` : `<div class="detail-poster-ph">${icon('film')}</div>`}</div>
+              <div class="d-info">
+                <h1 class="d-title">${esc(d.title)} <span class="d-year">(${esc(d.year || '')})</span></h1>
+                <div class="d-meta">
+                  ${MoviePlusUI.ratingChip(d.rating)}
+                  ${d.runtime ? `<span class="chip">${d.runtime} min</span>` : ''}
+                  <span class="chip">${kind === 'archive' ? 'Dominio público · Archive.org' : 'Tu Jellyfin'}</span>
+                  ${subtitleChip}
+                </div>
+                ${(d.genres && d.genres.length) ? `<div class="d-genres">${d.genres.map((g) => `<span>${esc(g)}</span>`).join('')}</div>` : ''}
+                ${d.overview ? `<div class="d-overview">${esc(d.overview)}</div>` : ''}
+                <div class="d-actions">
+                  ${d.sources && d.sources.length ? `
+                    <button class="btn primary" id="btnPlaySel"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg>Reproducir</button>
+                    <button class="btn" id="btnDownloadSel"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg>Descargar</button>` : `
+                    <span class="chip">Sin video disponible en este elemento</span>`}
+                  <button class="btn ${fav ? 'danger-ghost' : ''}" id="btnFav" aria-pressed="${fav}">${fav ? icon('heart')+'En Mi lista' : icon('heart')+'Mi lista'}</button>
+                  ${kind === 'archive' ? '<button class="btn" id="btnArchiveWeb"><svg class="icon" aria-hidden="true"><use href="#i-link"/></svg>Ver en Archive.org</button>' : ''}
+                </div>
+                ${d.sources && d.sources.length ? qualityPicker(listPlayableSources(d.sources)) : ''}
+              </div>
+            </div>
+          </div>
+          ${d.type === 'tv' ? `<div class="row-head"><h2>Capítulos</h2></div><div id="jfSeasons"></div>` : ''}
+        </div>`;
+
+      const srcQualities = listPlayableSources(d.sources || []);
+      if ($('#btnPlaySel')) $('#btnPlaySel').onclick = () => {
+        const sel = selectedQuality() || srcQualities[0] || d.sources[0];
+        Player.open({
+          type: d.type, id: d.id, title: d.title, poster: d.poster, kind: 'stream', mediaKind:kind,
+          url: sel.url,
+          urls: srcQualities.map((s) => ({ name: s.name, size: s.size, url: s.url })),
+        });
+        // Subtítulos incluidos de Archive.org (automático)
+        if (d.subtitles && d.subtitles.length) {
+          setTimeout(() => Player.loadSubtitleFromUrl(d.subtitles[0].url, 'Archive.org'), 1500);
+        }
+      };
+      if ($('#btnDownloadSel')) $('#btnDownloadSel').onclick = () => {
+        const sel = selectedQuality() || srcQualities[0] || d.sources[0];
+        if (!sel.url) { toast('No hay URL a descargar'); return; }
+        const ext = sel.name.toLowerCase().startsWith('srt') ? 'ts' : (sel.name.toLowerCase().includes('ogv') ? 'ogv' : 'mp4');
+        startDownloadFlow({ url: sel.url, filename: `${d.title} ${sel.name}.${ext}`, title: d.title, quality: sel.name, size: sel.size });
+      };
+      $('#btnFav').onclick = () => {
+        const on = Store.toggleFavorite({ type: d.type, id: d.id, title: d.title, poster: d.poster, year: d.year,rating:d.rating, kind });
+        $('#btnFav').innerHTML = icon('heart') + (on ? 'En Mi lista' : 'Mi lista');
+        $('#btnFav').setAttribute('aria-pressed',String(on));
+        $('#btnFav').className = `btn ${on ? 'danger-ghost' : ''}`;
+        toast(on ? 'Agregado a Mi Lista' : 'Quitado de Mi Lista');
+      };
+      const webBtn = $('#btnArchiveWeb');
+      if (webBtn) webBtn.onclick = () => Platform.openUrl(`https://archive.org/details/${id}`);
+      wireQualityPicker(srcQualities);
+
+      if (d.type === 'tv') renderJellyfinSeasons(d);
+    } catch (e) {
+      content().innerHTML = `<div class="view"><div class="empty-state"><div class="big">⚠️</div><div>Error: ${esc(e.message)}</div></div></div>`;
+    }
+  }
+
+  async function renderJellyfinSeasons(detail) {
+    const box = $('#jfSeasons');
+    if (!box) return;
+    const seasons = detail.seasons || [];
+    if (!seasons.length) { box.innerHTML = '<div class="empty-state"><div>Episodios no disponibles.</div></div>'; return; }
+    box.innerHTML = `
+      <div class="seasons-tabs">${seasons.map((s, i) => `<button class="season-tab ${i === 0 ? 'active' : ''}" data-sid="${s.seasonId}">${esc(s.name)}</button>`).join('')}</div>
+      <div class="episodes" id="jfEps"><div class="empty-state"><div>Cargando capítulos…</div></div></div>`;
+
+    const loadEps = async (seasonId) => {
+      const epsBox = $('#jfEps');
+      epsBox.innerHTML = '<div class="empty-state"><div>Cargando capítulos…</div></div>';
+      try {
+        const eps = await API.jellyfinEpisodes(detail.id, seasonId);
+        if (!eps.length) { epsBox.innerHTML = '<div class="empty-state"><div>No hay capítulos para mostrar.</div></div>'; return; }
+        epsBox.innerHTML = eps.map((e) => {
+          const watched = Store.isEpisodeWatched('tv', detail.id, e.episode.season, e.episode.number);
+          const resume = Store.getResume('tv', detail.id, e.episode.season, e.episode.number);
+          const pct = resume && resume.duration ? Math.min(100, Math.round((resume.position / resume.duration) * 100)) : 0;
+          return `
+            <div class="episode" data-e="${e.episode.number}">
+              <div class="ep-still">
+                ${e.poster ? `<img alt="" src="${esc(e.poster)}" loading="lazy"/>` : `<div class="ph">${icon('film')}</div>`}
+                ${pct ? `<div class="ep-progress" style="width:${pct}%"></div>` : ''}
+              </div>
+              <div class="ep-body">
+                <div class="ep-meta">
+                  <div class="ep-num">T${e.episode.season} · E${e.episode.number} ${watched ? '<span class="ep-watched-badge">✓ visto</span>' : ''}</div>
+                  <div class="ep-name">${esc(e.title)}</div>
+                  <div class="ep-over">${esc(e.overview || '')}</div>
+                </div>
+                <div class="ep-actions">
+                  <button data-play="1"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg>Reproducir</button>
+                  <button data-dl="1"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg>Descargar</button>
+                  <button data-skip="1"><svg class="icon" aria-hidden="true"><use href="#i-clock"/></svg>Salto de intro</button>
+                  <button data-mark="1">${watched ? 'Quitar visto' : 'Marcar visto'}</button>
+                </div>
+              </div>
+            </div>`;
+        }).join('');
+
+        $$('.episode', epsBox).forEach((el, idx) => {
+          wireEpisodeCard(el);
+          const e = eps[idx];
+          const playBtn = el.querySelector('button[data-play]');
+          const dlBtn = el.querySelector('button[data-dl]');
+          const skipBtn = el.querySelector('button[data-skip]');
+          const markBtn = el.querySelector('button[data-mark]');
+          if (playBtn) playBtn.onclick = (ev) => {
+            ev.stopPropagation();
+            const nxt = eps[idx + 1] || null;
+            Player.open({
+              type: 'tv', id: detail.id,tmdbId:Number(detail.tmdbId)||Number(String(detail.canonicalId||detail.canonical||'').replace(/^(?:tmdb:)?(?:series|tv):/,''))||(/^\d+$/.test(String(detail.id))?Number(detail.id):0),isAnime:Number(detail.catalogType||detail.raw?.type)===3,imdbId:detail.external_ids?.imdb_id||detail.imdb_id||'',malId:Number(detail.malId||detail.mal_id)||0,
+              title: `${detail.title} — T${e.episode.season}·E${e.episode.number}`,
+              poster: detail.poster, kind: 'stream',
+              url: API.jellyfinStreamUrl(e.id),
+              season: e.episode.season, episode: e.episode.number,
+              nextEpisode: nxt ? {
+                label: `T${nxt.episode.season}·E${nxt.episode.number}`,
+                open: () => playBtn && Player.open({ type: 'tv', id: detail.id, title: `${detail.title} — T${nxt.episode.season}·E${nxt.episode.number}`, poster: detail.poster, kind: 'stream', url: API.jellyfinStreamUrl(nxt.id), season: nxt.episode.season, episode: nxt.episode.number }),
+              } : null,
+            });
+          };
+          if (dlBtn) dlBtn.onclick = (ev) => {
+            ev.stopPropagation();
+            startDownloadFlow({
+              url: API.jellyfinStreamUrl(e.id),
+              filename: `${detail.title} T${e.episode.season}E${e.episode.number}.mp4`,
+              title: detail.title, quality: 'HLS',
+            });
+          };
+          if (skipBtn) skipBtn.onclick = (ev) => {
+            ev.stopPropagation();
+            editSkipTimes(detail.id, e.episode.season, e.episode.number);
+          };
+          if (markBtn) markBtn.onclick = (ev) => {
+            ev.stopPropagation();
+            Store.toggleWatchedEpisode('tv', detail.id, e.episode.season, e.episode.number);
+            loadEps(seasonId);
+          };
+        });
+      } catch (e) {
+        epsBox.innerHTML = `<div class="empty-state"><div>Error cargando capítulos: ${esc(e.message)}</div></div>`;
+      }
+    };
+
+    $$('.season-tab', box).forEach((t) => t.addEventListener('click', () => {
+      $$('.season-tab', box).forEach((x) => x.classList.remove('active'));
+      t.classList.add('active');
+      loadEps(t.dataset.sid);
+    }));
+    loadEps(seasons[0].seasonId);
+  }
+
+  /* ============================ Detalle de catálogo externo ============================ */
+  async function renderCatalogDetail(id, catalogUrl) {
+    const route=currentRoute;
+    if (!catalogUrl) { go('home'); return; }
+    content().innerHTML='<div class="view"><p role="status" data-source-state="loading">Consultando la ficha y sus fuentes…</p></div>';
+    const settings = Store.settings;
+    const cats = await API.loadCatalogs(settings.catalogUrls).catch(() => ({ items: [] }));
+    if(currentRoute!==route)return;
+    const item = cats.items.find((x) => String(x.id) === String(id) && x.catalogUrl === catalogUrl);
+    if (!item) { toast('Elemento no encontrado en el catálogo'); go('home'); return; }
+    if(item.type==='tv'){const result=await API.episodesFor(item);item.raw={...item.raw,episodes:result.episodes};item.episodeError=result.warnings[0]?.error;}
+    if(MoviePlusUI.ratingValue(item.rating)===null){
+      const tmdbId=((item.identities||[]).find(identity=>identity.providerId==='tmdb')||{}).id||item.id;
+      const score=await API.ratingFor(item.type,tmdbId).catch(()=>null);
+      if(score!==null){item.rating=score;rememberRating(item.type,item.id,score);}
+      if(currentRoute!==route)return;
+    }
+
+    const fav = Store.isFavorite(item.type, item.id);
+    const additional = item.type==='movie' ? await API.sourcesFor(item) : {sources:[]};
+    if(currentRoute!==route)return;
+    const allQualities=item.type==='movie'?listPlayableSources(additional.allSources):[];
+    const qualities = allQualities;
+    const itemGenres = (item.genres && item.genres.length ? item.genres : MoviePlusCore.catalogGenres(item).map(genreLabel)).filter(Boolean);
+    const itemOverview = item.overview || item.raw?.description || item.raw?.overview || '';
+    const catSeriesResume = item.type === 'tv' ? Store.resumeList.find(r => r.type === 'tv' && String(r.id) === String(item.id) && r.season && r.episode) : null;
+    const hasCatMovieResume = item.type === 'movie' && !!Store.getResume('movie', item.id);
+    const firstCatPlayableEp = item.type === 'tv' ? (item.raw?.episodes || []).find(ep => API.parseSources(ep.urls, ep.resolutions).some(s => s.url)) : null;
+    $('#tbTitle').textContent = item.title || (item.type === 'tv' ? 'Serie' : 'Película');
+    content().innerHTML = `
+      <div class="view detail-view">
+        <div class="detail-tabs" role="tablist" aria-label="Secciones de la ficha">
+          <button type="button" class="detail-tab active" data-dtab="summary">Resumen</button>
+          ${item.type === 'tv' ? '<button type="button" class="detail-tab" data-dtab="seasons">Temporadas</button>' : ''}
+        </div>
+        <div class="detail-hero">
+          <div class="backdrop" style="background-image:url('${esc(item.backdrop || item.poster || '')}')"></div>
+          <div class="content">
+            <div class="detail-poster">${item.poster ? `<img alt="" src="${esc(item.poster)}"/>` : `<div class="detail-poster-ph">${icon('film')}</div>`}</div>
+            <div class="d-info">
+              <h1 class="d-title">${esc(item.title)} <span class="d-year">${item.year ? `(${esc(String(item.year).slice(0,4))})` : ''}</span></h1>
+              <div class="d-meta"><span class="chip chip-accent">${item.type === 'tv' ? 'Serie' : 'Película'}</span>${item.year ? `<span class="chip">${esc(String(item.year).slice(0,4))}</span>` : ''}${MoviePlusUI.ratingChip(item.rating)}<span class="chip d-id">TMDB ${esc(item.id)}</span></div>
+              ${itemGenres.length ? `<div class="d-genres">${itemGenres.map(g => `<span>${esc(g)}</span>`).join('')}</div>` : ''}
+              ${item.othersNames ? `<div class="d-meta"><span class="d-alt-names">También: ${esc(item.othersNames)}</span></div>` : ''}
+              ${itemOverview ? `<div class="d-overview">${esc(itemOverview)}</div>` : ''}
+              <div class="d-actions">
+                ${qualities.length && qualities[0].url ? '<button class="btn primary" id="btnPlaySel"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg>Reproducir</button><button class="btn" id="btnDownloadSel"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg>Descargar</button>' : catSeriesResume ? `<button class="btn primary" id="btnResumeSeries"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg>Continuar T${catSeriesResume.season}·E${catSeriesResume.episode}</button>` : firstCatPlayableEp ? `<button class="btn primary" id="btnPlayFirstEp"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg>Reproducir T${firstCatPlayableEp.season}·E${firstCatPlayableEp.episode}</button>` : item.type==='tv'?`<span class="chip">${esc(item.episodeError || 'Elige un episodio para reproducir')}</span>`:''}
+                ${item.type==='movie'?sourceStatusMarkup(qualities,additional):''}
+                <button class="btn ${fav ? 'danger-ghost' : ''}" id="btnFav" aria-pressed="${fav}">${fav ? icon('heart')+'En Mi lista' : icon('heart')+'Mi lista'}</button>
+                ${catSeriesResume || hasCatMovieResume ? '<button class="btn" id="btnRemoveResume">Quitar de continuar</button>' : ''}
+                <button class="btn" id="btnShare"><svg class="icon" aria-hidden="true"><use href="#i-link"/></svg>Copiar enlace TMDB</button>
+              </div>
+              ${qualities.length ? qualityPicker(qualities) : ''}
+            </div>
+          </div>
+        </div>
+        ${item.type === 'tv' && item.raw && Array.isArray(item.raw.episodes) && item.raw.episodes.length ? catalogEpisodes(item) : ''}
+      </div>`;
+
+    $$('.detail-tab').forEach(tabBtn => tabBtn.addEventListener('click', () => {
+      $$('.detail-tab').forEach(b => b.classList.toggle('active', b === tabBtn));
+      if (tabBtn.dataset.dtab === 'seasons') $('#catEps')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      else content().scrollTo({ top: 0, behavior: 'smooth' });
+    }));
+
+    if($('#retrySources'))$('#retrySources').onclick=()=>{API.invalidate();renderCatalogDetail(id,catalogUrl);};
+    if ($('#btnResumeSeries') && catSeriesResume) {
+      $('#btnResumeSeries').onclick = () => resumeItem('tv', item.id, Number(catSeriesResume.season), Number(catSeriesResume.episode));
+    }
+    if ($('#btnPlayFirstEp') && firstCatPlayableEp) {
+      $('#btnPlayFirstEp').onclick = () => {
+        const sNum = Number(firstCatPlayableEp.season);
+        const eNum = Number(firstCatPlayableEp.episode);
+        const seasonEps = (item.raw?.episodes || []).filter(ep => Number(ep.season) === sNum);
+        const urls = pickEpisodeUrls(seasonEps, eNum);
+        if (urls.length) openEpisode(item, sNum, eNum, urls[0].url, urls[0].name, seasonEps);
+      };
+    }
+    if ($('#btnRemoveResume')) {
+      $('#btnRemoveResume').onclick = () => {
+        Store.removeResume(item.type, item.id);
+        $('#btnRemoveResume').remove();
+        toast('Quitado de continuar viendo');
+      };
+    }
+    if ($('#btnPlaySel')) $('#btnPlaySel').onclick = () => {
+      const sel = selectedQuality() || qualities[0];
+      if (!sel.url) { toast('No hay URL a reproducir, prueba con otra calidad.'); return; }
+      Player.open({
+        type: item.type, id: item.id, title: item.title, poster: item.poster, kind: 'stream',
+        url: sel.url, urls: allQualities.filter((q) => q.url).map((q) => ({ name: q.name, size: q.size, url: q.url })),
+      });
+    };
+    if ($('#btnDownloadSel')) $('#btnDownloadSel').onclick = () => {
+      const sel = selectedQuality() || qualities[0];
+      if (!sel.url) { toast('No hay URL a descargar, prueba con otra calidad.'); return; }
+      startDownloadFlow({ url: sel.url, filename: `${item.title} ${sel.name}.mp4`, title: item.title, quality: sel.name, size: sel.size });
+    };
+    $('#btnFav').onclick = () => {
+      const on = Store.toggleFavorite({ type: item.type, id: item.id, title: item.title, poster: item.poster, year: item.year,rating:item.rating, kind: 'catalog', catalogUrl });
+      $('#btnFav').innerHTML = icon('heart') + (on ? 'En Mi lista' : 'Mi lista');
+      $('#btnFav').setAttribute('aria-pressed',String(on));
+      $('#btnFav').className = `btn ${on ? 'danger-ghost' : ''}`;
+      toast(on ? 'Agregado a Mi Lista' : 'Quitado de Mi Lista');
+    };
+    if ($('#btnShare')) $('#btnShare').onclick = () => {
+      Platform.clipboardWrite(`https://www.themoviedb.org/${item.type === 'tv' ? 'tv' : 'movie'}/${item.id}`);
+      toast('URL copiada');
+    };
+    wireQualityPicker(qualities);
+    verifyQualityBox(qualities);
+    if (item.type === 'tv' && item.raw && Array.isArray(item.raw.episodes)) {
+      wireCatalogEpisodes(item);
+    }
+  }
+
+  function catalogEpisodes(item) {
+    const seasons = [...new Set(item.raw.episodes.map((e) => Number(e.season)))].sort((a, b) => a - b);
+    const savedResume = Store.resumeList.find(r => r.type === 'tv' && String(r.id) === String(item.id));
+    const initialSeason = seasons.includes(Number(savedResume?.season)) ? Number(savedResume.season) : seasons[0];
+    return `
+      <div class="row-head"><h2>Capítulos</h2></div>
+      <div class="seasons-tabs">${seasons.map((s) => `<button class="season-tab ${s === initialSeason ? 'active' : ''}" data-s="${s}">Temporada ${s}</button>`).join('')}</div>
+      <div class="episodes" id="catEps"></div>`;
+  }
+
+  function wireCatalogEpisodes(item) {
+    const tabs = $$('#content .season-tab');
+    const load = (s) => {
+      const eps = item.raw.episodes.filter((e) => Number(e.season) === Number(s));
+      const box = $('#catEps');
+      box.innerHTML = eps.map((e) => {
+        const watched = Store.isEpisodeWatched(item.type, item.id, e.season, e.episode);
+        const urls = listPlayableSources(API.parseSources(e.urls, e.resolutions));
+        const resume = Store.getResume(item.type, item.id, e.season, e.episode);
+        const pct = resume && resume.duration ? Math.min(100, Math.round((resume.position / resume.duration) * 100)) : 0;
+        return `
+          <div class="episode" data-season="${e.season}" data-ep="${e.episode}" data-e="${e.episode}">
+            <div class="ep-still">${e.stillPath ? `<img alt="" src="${esc(e.stillPath)}" loading="lazy"/>` : `<div class="ph">${icon('film')}</div>`}${pct ? `<div class="ep-progress" style="width:${pct}%"></div>` : ''}</div>
+            <div class="ep-body">
+              <div class="ep-meta">
+                <div class="ep-num"><span class="ep-code">S${String(e.season).padStart(2, '0')}E${String(e.episode).padStart(2, '0')}</span> · T${e.season} · E${e.episode} ${watched ? '<span class="ep-watched-badge">✓ visto</span>' : ''}</div>
+                <div class="ep-name">${esc(e.name || `Episodio ${e.episode}`)}</div>
+                <div class="ep-over">${esc(e.overview || '')}</div>
+              </div>
+              ${episodeActionsMarkup(urls, watched, true, 'Sin fuentes disponibles en este capítulo')}
+            </div>
+          </div>`;
+      }).join('');
+      $$('#catEps .episode').forEach((epDiv) => {
+        wireEpisodeCard(epDiv);
+        wireEpisodeQualitySelect(epDiv);
+      });
+      $$('#catEps button').forEach((b) => b.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        const epDiv = b.closest('.episode');
+        const sNum = Number(epDiv.dataset.season);
+        const eNum = Number(epDiv.dataset.ep);
+        const ep = eps.find((x) => Number(x.season) === sNum && Number(x.episode) === eNum);
+        if (b.dataset.play) {
+          const nxt = item.raw.episodes.find((x) => Number(x.season) === sNum && Number(x.episode) === eNum + 1)
+            || item.raw.episodes.find((x) => Number(x.season) === sNum + 1 && Number(x.episode) === 1);
+          const baseTitle = String(item.title || '').replace(/\s*—\s*T\d+·E\d+.*$/, '');
+          Player.open({
+            type: item.type, id: item.id, title: `${baseTitle} — T${sNum}·E${eNum}`, poster: item.poster,
+            catalogUrl: item.catalogUrl,
+            kind: 'stream', url: b.dataset.url,
+            urls: listPlayableSources(API.parseSources(ep.urls, ep.resolutions)),
+            season: sNum, episode: eNum,
+            nextEpisode: nxt ? {
+              label: `T${nxt.season}·E${nxt.episode}`,
+              open: () => {
+                const u = API.parseSources(nxt.urls, nxt.resolutions).find(source => source.url)?.url;
+                if (u) openEpisode(item, Number(nxt.season), Number(nxt.episode), u, '', item.raw.episodes.filter(ep => Number(ep.season) === Number(nxt.season)));
+              },
+            } : null,
+          });
+        } else if (b.dataset.dl) {
+          startDownloadFlow({ url: b.dataset.url, filename: `${item.title} T${sNum}E${eNum} ${b.dataset.name}.mp4`, title: item.title, quality: b.dataset.name });
+        } else if (b.dataset.skip) {
+          editSkipTimes(item.id, sNum, eNum);
+        } else if (b.dataset.mark) {
+          Store.toggleWatchedEpisode(item.type, item.id, sNum, eNum);
+          load(sNum);
+        }
+      }));
+    };
+    tabs.forEach((t) => t.addEventListener('click', () => {
+      tabs.forEach((x) => x.classList.remove('active'));
+      t.classList.add('active');
+      load(Number(t.dataset.s));
+    }));
+    const activeTab = $('#content .season-tab.active') || tabs[0];
+    if (activeTab) load(Number(activeTab.dataset.s));
+  }
+
+  /* ============================ Mi Lista ============================ */
+  function renderMyList(params = {}) {
+    const tab = params.tab || 'favorites';
+    const libraryType=['movie','tv'].includes(params.type)?params.type:'';
+    const inLibrary=item=>!libraryType||item.type===libraryType;
+    Object.assign(currentRoute.params,{tab,type:libraryType});
+    const mylistLabels = { favorites: 'Favoritos', continue: 'Continuar', history: 'Historial Repr.', watched: 'Vistos' };
+    $('#tbTitle').textContent = mylistLabels[tab] || 'Favoritos';
+    content().innerHTML = `
+      <div class="view">
+        <header class="page-heading page-heading-split sr-only"><div><h1>Tu biblioteca</h1></div><button class="btn" id="libraryDownloads">${icon('download')}Descargas</button></header>
+        <div class="tabs">
+          <button data-tab="favorites" class="${tab === 'favorites' ? 'active' : ''}">Favoritos</button>
+          <button data-tab="continue" class="${tab === 'continue' ? 'active' : ''}">Continuar</button>
+          <button data-tab="history" class="${tab === 'history' ? 'active' : ''}">Historial Repr.</button>
+          <button data-tab="watched" class="${tab === 'watched' ? 'active' : ''}">Vistos</button>
+        </div>
+        <div class="browse-filters"><label for="libraryType">Tipo de contenido<select id="libraryType"><option value="">Películas y series</option><option value="movie">Películas</option><option value="tv">Series</option></select></label></div><div id="listBox"></div>
+      </div>`;
+    $('#libraryDownloads').onclick=()=>go('downloads');
+    $$('.tabs button').forEach((b) => b.addEventListener('click', () => {const tab=b.dataset.tab;renderMyList({tab,type:''});if(tvInterface())$(`#content .tabs button[data-tab="${tab}"]`)?.focus({preventScroll:true});}));
+    $('#libraryType').value=libraryType;$('#libraryType').onchange=()=>{renderMyList({tab,type:$('#libraryType').value});$('#libraryType').focus();};
+    const box = $('#listBox');
+    if (tab === 'favorites') {
+      const favs = Store.favorites.filter(inLibrary);
+      box.innerHTML = favs.length ? `<div class="grid">${favs.map((f) => posterCard({
+        type: f.type, id: f.id, title: f.title, poster: f.poster, year: f.year,rating:f.rating, kind: f.kind || 'tmdb', catalogUrl: f.catalogUrl,
+      })).join('')}</div>` : emptyState('🤍', 'Sin favoritos todavía. Toca el corazón en cualquier título.');
+      $$('.poster',box).forEach(card=>{
+        if(card.querySelector('.poster-remove'))return;
+        card.classList.add('poster-removable');
+        const remove=event=>{
+          if(event){event.preventDefault();event.stopPropagation();}
+          const type=card.dataset.type,id=card.dataset.id;
+          Store.toggleFavorite({type,id});
+          renderMyList({tab:'favorites',type:libraryType});
+          toastAction('Quitado de favoritos','Deshacer',()=>{
+            Store.toggleFavorite({type,id});
+            renderMyList({tab:'favorites',type:libraryType});
+            toast('Restaurado en favoritos');
+          });
+        };
+        const button=document.createElement('button');
+        button.type='button';
+        button.className='poster-remove flag-circle';
+        button.title='Quitar de favoritos';
+        button.setAttribute('aria-label','Quitar de favoritos');
+        button.innerHTML='<svg class="icon" aria-hidden="true"><use href="#i-trash"/></svg>';
+        button.addEventListener('click',remove);
+        const heart=card.querySelector('.poster-flags .flag-circle.fav');
+        const flags=card.querySelector('.poster-flags');
+        if(heart)heart.after(button);
+        else if(flags)flags.appendChild(button);
+        else (card.querySelector('.poster-art')||card).appendChild(button);
+        card.addEventListener('contextmenu',event=>{event.preventDefault();remove(event);});
+        card.addEventListener('keydown',event=>{
+          if(event.key!=='Delete'&&event.key!=='Backspace')return;
+          remove(event);
+        });
+      });
+    } else if (tab === 'history') {
+      const entries=[...Store.resumeList,...Store.watchedTitlesList].filter(inLibrary).sort((a,b)=>(b.updatedAt||b.at||0)-(a.updatedAt||a.at||0));
+      const newest=new Map();for(const item of entries){const key=`${item.type}:${item.id}`;if(!newest.has(key))newest.set(key,item);}const unique=[...newest.values()];
+      box.innerHTML=unique.length?`<div class="row-head"><h2>Recientes (${unique.length})</h2><button class="btn" id="btnClearHistory">Limpiar historial</button></div><div class="grid">${unique.map(item=>posterCard(item)).join('')}</div>`:emptyState('▶','Tu historial aparecerá después de reproducir o marcar un título como visto.');
+      if ($('#btnClearHistory')) $('#btnClearHistory').onclick = () => { Store.clearWatchHistory(); renderMyList({ tab: 'history', type: libraryType }); toast('Historial de reproducción borrado'); };
+    } else if (tab === 'continue') {
+      const list = Store.resumeList.filter(inLibrary);
+      box.innerHTML = list.length ? `<div class="row-head"><h2>En curso (${list.length})</h2><button class="btn" id="btnClearContinue">Limpiar en curso</button></div><div class="grid">${list.map(it => posterCard(it, true)).join('')}</div>` : emptyState('▶', 'Nada en curso. Lo que dejes a medias aparecerá aquí.');
+      if ($('#btnClearContinue')) $('#btnClearContinue').onclick = () => { Store.clearResume(); renderMyList({ tab: 'continue', type: libraryType }); toast('Lista de continuar viendo vaciada'); };
+    } else {
+      const seen = Store.watchedTitlesList.filter(inLibrary).map(it => { const item = API.findCatalogItem(it.type, it.id); return item ? { ...it, ...item } : it; });
+      const watchedEps = (libraryType==='movie'?[]:Store.watchedEpisodesList).map(it => ({ ...it, seriesTitle: it.seriesTitle || API.findCatalogItem('tv', it.seriesId)?.title }));
+      let html = '';
+      if (seen.length) html += `<div class="row-head"><h2>Películas vistas</h2></div><div class="grid">${seen.map((it) => posterCard(it)).join('')}</div>`;
+      if (watchedEps.length) {
+        html += `<div class="row-head"><h2>Capítulos vistos</h2></div><div class="episodes">${watchedEps.map((w) => `
+          <div class="episode" role="button" tabindex="0" data-open-series="${esc(w.seriesId)}">
+            <div class="ep-still"><div class="ph">${icon('film')}</div></div>
+            <div class="ep-body"><div class="ep-meta"><div class="ep-num">T${esc(w.season)} · E${esc(w.episode)} <span class="ep-watched-badge">✓ visto</span></div>
+            <div class="ep-name">${esc(w.seriesTitle || `TMDB ${w.seriesId}`)}</div></div>
+            <div class="ep-actions"><button type="button" data-unwatch-ep="1" data-sid="${esc(w.seriesId)}" data-s="${esc(w.season)}" data-e="${esc(w.episode)}">Quitar visto</button></div></div>
+          </div>`).join('')}</div>`;
+      }
+      box.innerHTML = html || emptyState('✓', 'Marca capítulos o películas como vistos para verlos aquí.');
+      $$('#listBox .episode[data-open-series]').forEach((epRow) => {
+        const openSeries = () => {
+          const sid = epRow.dataset.openSeries;
+          const catItem = API.findCatalogItem('tv', sid);
+          if (catItem && catItem.catalogUrl) go('catalog', { id: sid, catalogUrl: catItem.catalogUrl });
+          else go('tv', { id: sid });
+        };
+        epRow.addEventListener('click', openSeries);
+        epRow.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); openSeries(); } });
+      });
+      $$('#listBox button[data-unwatch-ep]').forEach((btn) => {
+        btn.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          Store.toggleWatchedEpisode('tv', btn.dataset.sid, Number(btn.dataset.s), Number(btn.dataset.e));
+          toast('Quitado de vistos');
+          renderMyList({ tab: 'watched', type: libraryType });
+        });
+      });
+    }
+    wirePosters();
+  }
+
+  function emptyState(kind, text) {
+    const illustration=icon(({"🤍":"heart","▶":"play","✓":"check","🎬":"film","⬇️":"download","📜":"folder"})[kind]||"info");
+    return `<div class="empty-state"><div class="big">${illustration}</div><div>${esc(text)}</div></div>`;
+  }
+
+  /* ============================ Descargas ============================ */
+  async function renderDownloads() {
+    if(Platform.isAndroid&&!Platform.offlineDownloads){content().innerHTML='<div class="view"><header class="page-heading"><h1>Descargas</h1><p>Para guardar videos sin conexión, instala la versión 1.12.3 para celular. Después recibirás las mejoras habituales desde la aplicación.</p></header><a class="btn primary" href="https://github.com/john2k2/nebula-actualizaciones/releases/download/native-v1.12.3/Nebula-Android-Celular-1.12.3-arm64-v8a-debug.apk" target="_blank" rel="noopener">Actualizar para usar descargas</a></div>';return;}
+    const route=currentRoute,request=++downloadsRequest;
+    const active = await Platform.downloadActive();
+    const activeIds=new Set(active.map(entry=>entry.id));
+    const history = (await Platform.historyList()).filter(entry=>!activeIds.has(entry.id));
+    if (currentRoute!==route||request!==downloadsRequest) return;
+    content().innerHTML = `
+      <div class="view">
+        <header class="page-heading"><h1>Descargas</h1><p>${Platform.isAndroid?'Guarda videos para verlos sin conexión. Se eliminan al desinstalar la aplicación.':'Sigue tus descargas o reproduce un archivo de este equipo.'}</p></header>
+        <div class="row-head"><h2>Descargas activas</h2>${Platform.isAndroid?'':'<button class="btn" id="btnDownloadLocal">+ Archivo local</button>'}</div>
+        <div id="activeBox">${active.length ? '' : '<div class="empty-state"><div class="big">'+icon('download')+'</div><div>Sin descargas activas</div></div>'}</div>
+        <div class="section-title">Historial de descargas</div>
+        <div id="historyBox">${history.length ? '' : '<div class="empty-state"><div class="big">'+icon('folder')+'</div><div>Historial vacío</div></div>'}</div>
+      </div>`;
+    const box = $('#activeBox');
+    active.forEach((d) => box.insertAdjacentHTML('beforeend', downloadCard(d)));
+    const hBox = $('#historyBox');
+    history.slice().reverse().forEach((h) => hBox.insertAdjacentHTML('beforeend', historyCard(h)));
+    if($('#btnDownloadLocal')) $('#btnDownloadLocal').onclick = async () => {
+      const f = await Platform.pickFile({ filters: [{ name: 'Video', extensions: ['mp4', 'mkv', 'webm', 'ts'] }] });
+      if (f) Player.open({ type: 'local', id: `local:${f}`, title: f.split(/[\\/]/).pop(), kind: 'stream', url: `file:///${f.replace(/\\/g, '/')}` });
+    };
+    wireDownloadCards();
+  }
+
+  function downloadCard(d) {
+    const pct = d.totalBytes ? Math.round((d.bytes / d.totalBytes) * 100) : 0;
+    const statusCls = { completado: 'ok', error: 'err', cancelado: '' }[d.status] ?? 'act';
+    const bar = ['en cola','preparando','descargando','verificando'].includes(d.status)
+      ? `<div class="dl-bar"><div style="width:${pct}%"></div></div>` : '';
+    return `
+      <div class="dl-card" data-id="${esc(d.id)}">
+        <div class="dl-top">
+          <div class="dl-name">${esc(d.filename)}</div>
+          <div class="dl-status ${statusCls}">${esc(d.status)}${d.note ? ' · ' + esc(d.note) : ''}</div>
+        </div>
+        ${bar}
+        <div class="dl-info">
+          <span>${d.hls ? 'HLS' : 'Directo'}</span>
+          <span>${fmtBytes(d.bytes)}${d.totalBytes ? ' / ' + fmtBytes(d.totalBytes) : ''}</span>
+          ${d.status === 'descargando' ? `<span>${fmtBytes(d.speed)}/s</span>` : ''}
+        </div>
+        <div class="dl-actions">
+          ${['en cola','preparando','descargando','verificando'].includes(d.status) ? '<button data-act="cancel">Cancelar</button>' : ''}
+          ${d.status === 'completado' ? '<button data-act="open">Abrir</button>'+ (Platform.isAndroid?'':'<button data-act="reveal">Ubicación</button>') : ''}
+          ${!Platform.isAndroid||!['en cola','preparando','descargando','verificando'].includes(d.status)?'<button data-act="dismiss">Quitar</button>':''}
+        </div>
+      </div>`;
+  }
+
+  function historyCard(h) {
+    return `
+      <div class="dl-card" data-id="${esc(h.id || '')}" data-file="${esc(h.file || '')}">
+        <div class="dl-top">
+          <div class="dl-name">${esc(h.filename)}</div>
+          <div class="dl-status ${h.status === 'completado' ? 'ok' : 'err'}">${esc(h.status)}</div>
+        </div>
+        <div class="dl-info"><span>${fmtBytes(h.bytes)}</span><span>${new Date(h.at).toLocaleString()}</span></div>
+        <div class="dl-actions">
+${h.status === 'completado' ? '<button data-act="play">Reproducir</button>' : h.canRetry ? `<button data-act="retry">${h.resumable?'Reanudar':'Reintentar'}</button>` : ''}
+          ${Platform.isAndroid?'':'<button data-act="reveal">Abrir ubicación</button><button data-act="copy">Copiar ruta</button>'}
+          <button data-act="delete">Borrar archivo</button>
+          ${Platform.isAndroid?'':'<button data-act="removeHistory">Quitar del historial</button>'}
+        </div>
+      </div>`;
+  }
+
+  async function playDownloaded(file, title) {
+    const stat = await Platform.fileStat(file);
+    if (!stat.exists) { toast('El archivo descargado ya no está en esa ubicación'); return; }
+    const url = Platform.isAndroid ? file : 'file:///' + encodeURI(file.replace(/\\/g, '/')).replace(/#/g, '%23').replace(/\?/g, '%3F');
+    return Player.open({ type: 'local', id: 'local:' + file, title: title || file.split(/[\\/]/).pop(), kind: 'stream', url });
+  }
+
+  function wireDownloadCards() {
+    $$('#activeBox .dl-card').forEach((card) => {
+      card.querySelectorAll('button').forEach((b) => b.addEventListener('click', async () => {
+        const id = card.dataset.id;
+        const act = b.dataset.act;
+        if (act === 'cancel') { await Platform.downloadCancel(id); toast('Descarga cancelada'); }
+        else if (act === 'dismiss') { await Platform.downloadRemove(id); }
+        else if (act === 'open') {
+          const d = (await Platform.downloadActive()).find((x) => x.id === id);
+          if (d) { await playDownloaded(d.file, d.filename); return; }
+        } else if (act === 'reveal') {
+          const d = (await Platform.downloadActive()).find((x) => x.id === id);
+          if (d) Platform.fileReveal(d.file);
+        }
+        setTimeout(renderDownloads, 250);
+      }));
+    });
+    $$('#historyBox .dl-card').forEach((card) => {
+      card.querySelectorAll('button').forEach((b) => b.addEventListener('click', async () => {
+        const file = card.dataset.file;
+        const id = card.dataset.id;
+        const act = b.dataset.act;
+        let list = await Platform.historyList();
+        if(act==='retry'){await Platform.downloadRetry(id);renderDownloads();return;}
+        if (act === 'play') { await playDownloaded(file, card.querySelector('.dl-name').textContent); return; }
+        if (act === 'reveal') Platform.fileReveal(file);
+        else if (act === 'copy') { Platform.clipboardWrite(file); toast('Ruta copiada'); }
+        else if (act === 'delete') {
+          const st = await Platform.fileStat(file);
+          if (st.exists) { await Platform.fileDelete(file); toast('Archivo borrado.'); }
+          else toast('No se pudo borrar. Archivo no encontrado.');
+          await Platform.historyMutate({kind:'remove',id});
+        } else if (act === 'removeHistory') {
+          await Platform.historyMutate({kind:'remove',id});
+          toast('Historial removido.');
+        }
+        renderDownloads();
+      }));
+    });
+  }
+
+  async function startDownloadFlow({ url, filename, title, quality, size }) {
+    if(Platform.isAndroid&&!Platform.offlineDownloads){go('downloads');return;}
+    const settings = Store.settings;
+    const resumen = [title, quality, size].filter(Boolean).join(' · ');
+    const dir = settings.downloadDir || '';
+    try{
+      const entry = await Platform.downloadStart({ url, filename, dir });
+      if(!entry||entry.ok===false)throw Error(entry?.error||'No se pudo iniciar la descarga');
+      toastAction('Descarga iniciada: '+resumen,'Ver descargas',()=>go('downloads'));
+      if (currentView === 'downloads') renderDownloads();
+    }catch(error){toast(publicMessage(error.message)||'No se pudo iniciar la descarga. Vuelve a intentar.');}
+  }
+
+  function fmtBytes(n) {
+    if (!Number.isFinite(n) || n <= 0) return '0 B';
+    const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let i = 0;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return `${n.toFixed(i === 0 ? 0 : 1)} ${u[i]}`;
+  }
+
+  /* ============================ Ajustes ============================ */
+  async function renderSettings() {
+    const route=currentRoute;
+    const s = Store.settings;
+    const paths = await Platform.appPaths();
+    const nebulaRuntime=await Platform.nebulaCall('runtime.status',{}).catch(()=>({configured:false,root:''}));
+    if (currentRoute!==route) return;
+    content().innerHTML = `
+      <div class="view">
+        <header class="page-heading sr-only"><h1>Ajustes.</h1><p>Tu contenido y tu forma de reproducirlo.</p></header>
+        <div class="settings-grid">
+          ${typeof AppUpdates!=='undefined'?AppUpdates.html():''}
+          <div class="set-card">
+            <h2>Contenido</h2>
+            <div class="set-row"><label>Catálogo integrado<span class="hint">Películas y series, con actualización automática.</span></label><label class="switch"><input id="setBuiltin" type="checkbox" ${s.builtinCatalog !== false ? 'checked' : ''}/><span></span></label></div>
+            <div class="set-row"><label>Clave de TMDB<span class="hint">Opcional: usa tu clave para las fichas y recomendaciones.</span></label>
+              <input type="password" id="setTmdb" class="set-input" value="${esc(s.tmdbToken)}"/></div>
+            <div class="set-row"><label>Idioma del catálogo</label>
+              <select id="setLang">
+                ${['es-MX', 'es-ES', 'es', 'en-US', 'en'].map((l) => `<option ${l === s.language ? 'selected' : ''}>${l}</option>`).join('')}
+              </select></div>
+            <div class="set-row set-row-stack">
+              <label>Catálogos externos (JSON)<span class="hint">JSON con {"movies":[...],"series":[...]} — mismo esquema que el original (id TMDB, nameFile, urlImage, urls, resolutions, generos, vote)</span></label>
+              <div class="catalog-list" id="catalogList"></div>
+              <input type="text" id="newCatalogUrl" placeholder="https://…/catalogo.json"/>
+              <div class="m-actions set-actions-start"><button class="btn" id="btnAddCatalog">+ Agregar catálogo</button></div>
+            </div>
+          </div>
+
+          <div class="set-card">
+            <h2>Reproducción</h2>
+            <div class="set-row"><label for="setPlaybackMode">Calidad preferida<span class="hint">Auto puede cambiar de fuente si falla. 4K fijo nunca baja a 1080p.</span></label><select id="setPlaybackMode">${[['auto','Auto'],['fixed4k','4K fijo'],['manual','Elegir fuente']].map(([v,label])=>`<option value="${v}" ${MoviePlusCore.qualityMode(s.playbackMode)===v?'selected':''}>${label}</option>`).join('')}</select></div>
+            <div class="set-row"><label for="setTextScale">Tamaño del texto</label><select id="setTextScale"><option value="1">100 %</option><option value="1.25">125 %</option><option value="1.5">150 %</option></select></div>
+            <div class="set-row"><label>Ofrecer siguiente capítulo al terminar</label>
+              <label class="switch"><input type="checkbox" id="setAutoNext" ${s.autoPlayNext ? 'checked' : ''}/><span></span></label></div>
+            <div class="set-row"><label>Velocidad por defecto</label>
+              <select id="setSpeed">${[0.75, 1, 1.25, 1.5, 2].map((v) => `<option value="${v}" ${v === s.defaultSpeed ? 'selected' : ''}>${v}x</option>`).join('')}</select></div>
+            <div class="set-row"><label>Tamaño de subtítulos</label><input type="number" id="setSubSize" class="set-input-sm" value="${s.subFontSize}" min="10" max="40"/></div>
+            <div class="set-row" data-desktop-only="1"><label>Reproductor externo (VLC)<span class="hint">Ruta a vlc.exe — opcional, para abrir enlaces externamente</span></label>
+              <input type="text" id="setVlc" class="set-input" value="${esc(s.externalPlayer)}" placeholder="C:\\Program Files\\VideoLAN\\VLC\\vlc.exe"/></div>
+          </div>
+
+          <div class="set-card">
+            <h2>Fuentes</h2>
+            <div class="set-row"><label>Archive.org (dominio público)<span class="hint">Clásicos con MP4 directo y subtítulos — siempre activa</span></label>
+              <span class="chip">Activada</span></div>
+            <div class="set-row set-row-stack">
+              <label>Jellyfin (tu servidor)<span class="hint">URL del servidor + API key (Panel de Jellyfin → API Keys). Añade tu biblioteca al Inicio y a la búsqueda.</span></label>
+              <div class="set-inline-group">
+                <input type="text" id="setJfUrl" placeholder="http://192.168.1.10:8096" value="${esc(s.jellyfinUrl || '')}"/>
+                <input type="text" id="setJfKey" class="set-input-key" placeholder="API key" value="${esc(s.jellyfinKey || '')}"/>
+              </div>
+              <div class="m-actions set-actions-start"><button class="btn" id="btnJfTest">Probar conexión</button></div>
+              <div id="jfTestResult" class="set-status-note"></div>
+            </div>
+          </div>
+
+          <div class="set-card" data-desktop-only="1">
+            <h2>Descargas</h2>
+            <div class="set-row"><label>Carpeta de descargas</label>
+              <div class="set-inline-group"><input type="text" id="setDownDir" class="set-input" value="${esc(s.downloadDir || paths.downloads)}"/><button class="btn" id="btnPickDir" aria-label="Elegir carpeta de descargas">…</button></div></div>
+          </div>
+
+          <div class="set-card">
+            <h2>Datos y mantenimiento</h2>
+            <div class="set-row" data-desktop-only="1"><label>Instalación de la fuente adicional</label><button class="btn" id="btnNebulaInstall">Seleccionar carpeta</button></div>
+            <p class="muted" data-desktop-only="1" id="nebulaRuntimeStatus">${nebulaRuntime.configured?'Instalación configurada: '+esc(nebulaRuntime.root):'Selecciona la carpeta de la fuente adicional para configurar su conexión.'}</p>
+            <div class="set-row"><label>Conexión automática<span class="hint">Se conecta al abrir y recupera la sesión cuando hace falta.</span></label><button class="btn" id="btnNebulaReconnect">${nebulaRuntime.requiresReconnect?'Conectar fuente':'Reconectar fuente'}</button></div>
+            <div class="set-row"><label>Exportar respaldo</label><button class="btn" id="btnExport">Exportar</button></div>
+            <div class="set-row"><label>Importar respaldo</label><button class="btn" id="btnImport">Importar</button></div>
+            <div class="set-row"><label>Limpiar historial de reproducción</label><button class="btn" id="btnClearWatchHistory">Limpiar historial</button></div>
+            <div class="set-row"><label>Limpiar caché de imágenes</label><button class="btn" id="btnClearCache">Limpiar</button></div>
+            <div class="set-row"><label>Restablecer todo</label><button class="btn danger-ghost" id="btnReset">Restablecer</button></div>
+          </div>
+        </div>
+      </div>`;
+
+    /* wire */
+    $('#setTextScale').value=String(s.textScale||1);$('#setTextScale').onchange=()=>{Store.setSetting('textScale',Number($('#setTextScale').value));applyTextScale();};
+    $$('.set-row').forEach(row=>{const label=row.querySelector('label');const input=row.querySelector('input[id],select[id],textarea[id]');if(label&&input&&!label.contains(input))label.htmlFor=input.id;});
+    if ($('#btnClearWatchHistory')) {
+      $('#btnClearWatchHistory').onclick = () => {
+        Store.clearWatchHistory();
+        toast('Historial de reproducción borrado');
+      };
+    }
+    $('#btnNebulaInstall').onclick=async()=>{const folder=await Platform.pickDirectory();if(!folder)return;try{await Platform.nebulaCall('runtime.configure',{root:folder});API.invalidate();toast('Instalación configurada. Conecta la fuente para crear su sesión.');renderSettings();}catch(error){toast(publicMessage(error.message));}};
+    $('#btnNebulaReconnect').onclick=async()=>{const button=$('#btnNebulaReconnect');button.disabled=true;try{await (typeof SourceConnection!=='undefined'?SourceConnection.reconnect(true):Platform.nebulaCall('session.reconnect',{}));API.invalidate();button.textContent='Reconectar fuente';toast('Fuente adicional conectada');}catch(error){toast(publicMessage(error.message));}finally{button.disabled=false;}};
+    if(typeof AppUpdates!=='undefined')AppUpdates.bind();
+    $('#setBuiltin').addEventListener('change', (e) => { Store.setSetting('builtinCatalog', e.target.checked); API.invalidate(); toast(e.target.checked ? 'Catálogo integrado activado' : 'Catálogo integrado desactivado'); });
+    $('#setTmdb').addEventListener('change', (e) => { Store.setSetting('tmdbToken', e.target.value.trim()); API.invalidate(); toast('Clave actualizada'); });
+    $('#setLang').addEventListener('change', (e) => { Store.setSetting('language', e.target.value); API.invalidate(); toast('Idioma actualizado'); });
+    $('#setAutoNext').addEventListener('change', (e) => Store.setSetting('autoPlayNext', e.target.checked));
+    $('#setPlaybackMode').addEventListener('change',e=>Store.setSetting('playbackMode',MoviePlusCore.qualityMode(e.target.value)));
+    $('#setSpeed').addEventListener('change', (e) => Store.setSetting('defaultSpeed', Number(e.target.value)));
+    $('#setSubSize').addEventListener('change', (e) => Store.setSetting('subFontSize', Number(e.target.value)));
+    $('#setVlc').addEventListener('change', (e) => Store.setSetting('externalPlayer', e.target.value.trim()));
+    $('#setDownDir').addEventListener('change', (e) => Store.setSetting('downloadDir', e.target.value.trim()));
+    $('#setJfUrl').addEventListener('change', (e) => Store.setSetting('jellyfinUrl', e.target.value.trim()));
+    $('#setJfKey').addEventListener('change', (e) => Store.setSetting('jellyfinKey', e.target.value.trim()));
+    $('#btnJfTest').onclick = async () => {
+      const out = $('#jfTestResult');
+      out.textContent = 'Probando…';
+      try {
+        const base = Store.settings.jellyfinUrl.replace(/\/+$/, '');
+        const key = Store.settings.jellyfinKey.trim();
+        const r = await Platform.netFetch(`${base}/System/Info/Public`);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const info = JSON.parse(r.text);
+        const d = await Platform.netFetch(`${base}/Items?api_key=${key}&Recursive=true&Limit=1`);
+        out.textContent = d.ok ? `✔ Conectado: ${info.ServerName || 'Jellyfin'} (${info.Version || '?'})` : `✕ ${d.status}`;
+      } catch (e) { out.textContent = `✕ ${e.message}`; }
+    };
+    $('#btnPickDir').onclick = async () => {
+      const d = await Platform.pickDirectory();
+      if (d) { $('#setDownDir').value = d; Store.setSetting('downloadDir', d); }
+    };
+    renderCatalogList();
+    $('#btnAddCatalog').onclick = async () => {
+      const u = $('#newCatalogUrl').value.trim();
+      if (!/^https?:\/\//.test(u)) { toast('URL inválida'); return; }
+      const urls = [...s.catalogUrls, u];
+      Store.setSetting('catalogUrls', urls);
+      $('#newCatalogUrl').value = '';
+      renderCatalogList();
+      const r = await API.loadCatalogs([u]).catch((e) => ({ errors: [String(e)] }));
+      toast(r.errors && r.errors.length ? `Error: ${r.errors[0]}` : 'Catálogo cargado ✔');
+    };
+    $('#btnExport').onclick = async () => {
+      if (Platform.isAndroid && typeof Platform.profileShare === 'function') {
+        await Platform.profileShare();
+        toast('Compartiendo respaldo…');
+        return;
+      }
+      const blob = new Blob([await Platform.profileExport()], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `nebula-respaldo-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      toast('Respaldo exportado');
+    };
+    $('#btnImport').onclick = async () => {
+      if (Platform.isAndroid) {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.json,application/json,text/plain';
+        input.onchange = async () => {
+          const file = input.files?.[0];
+          if (!file) return;
+          try {
+            const txt = await file.text();
+            await Platform.profileImport(txt);
+            Store.reload(); API.invalidate();
+            toast('Respaldo importado ✔');
+            renderSettings();
+          } catch (e) { toast('Error importando: ' + e.message); }
+        };
+        input.click();
+        return;
+      }
+      const f = await Platform.pickFile({ filters: [{ name: 'JSON', extensions: ['json'] }] });
+      if (!f) return;
+      try {
+        const res = await fetch(`file:///${f.replace(/\\/g, '/')}`);
+        const txt = await res.text();
+        await Platform.profileImport(txt);
+        Store.reload();API.invalidate();
+        toast('Respaldo importado ✔');
+        renderSettings();
+      } catch (e) { toast('Error importando: ' + e.message); }
+    };
+    $('#btnClearCache').onclick = async () => { await Platform.clearCache(); toast('Caché limpiada'); };
+    if(Platform.isAndroid){
+      for(const id of ['btnNebulaInstall','btnClearCache','setVlc']){
+        const node=$('#'+id);if(node)node.closest('.set-row').classList.add('hidden');
+      }
+      $('#btnPickDir')?.closest('.set-card')?.classList.add('hidden');
+      $('#nebulaRuntimeStatus').textContent='Fuente integrada en Android. La conexión se gestiona automáticamente.';
+    }
+    $('#btnReset').onclick = () => showModal(`
+      <h2>¿Restablecer todo?</h2><p style="color:var(--muted)">Se borrarán favoritos, progreso, ajustes y catálogos.</p>
+      <div class="m-actions"><button class="btn" id="rsNo">Cancelar</button><button class="btn danger-ghost" id="rsYes">Restablecer</button></div>`,
+      () => {
+        $('#rsYes').onclick = () => { Store.reset(); closeModal(); toast('Restablecido'); renderSettings(); };
+        $('#rsNo').onclick = closeModal;
+      });
+  }
+
+  function renderCatalogList() {
+    const box = $('#catalogList');
+    if (!box) return;
+    const urls = Store.settings.catalogUrls || [];
+    box.innerHTML = urls.length
+      ? urls.map((u, i) => `<div class="catalog-item"><span>🔗</span><span style="flex:1">${esc(u)}${CatalogSources.isTestCatalog(u)?'<small> · Catálogo de pruebas: solo se consulta en QA</small>':''}</span><button data-i="${i}" title="Quitar">✕</button></div>`).join('')
+      : '<span style="color:var(--text-secondary);font-size:12px">Sin catálogos externos (usa TMDB por defecto)</span>';
+    box.querySelectorAll('button[data-i]').forEach((b) => b.addEventListener('click', () => {
+      const urls = [...Store.settings.catalogUrls];
+      urls.splice(Number(b.dataset.i), 1);
+      Store.setSetting('catalogUrls', urls);
+      API.invalidate();
+      renderCatalogList();
+    }));
+  }
+
+  /* ============================ Modal genérico ============================ */
+  let modalOnClose=null;
+  function showModal(html, wire, onClose=null) {
+    if(modalOnClose)closeModal();
+    modalOnClose=onClose;
+    const layer = $('#modalLayer');
+    modalReturnFocus=document.activeElement;
+    layer.innerHTML = `<div class="modal-card" role="dialog" aria-modal="true" aria-label="Confirmación">${html}</div>`;
+    layer.classList.remove('hidden');
+    wire && wire();
+    layer.querySelector('button,input,select,textarea')?.focus();
+  }
+  function closeModal() { $('#modalLayer').classList.add('hidden');if(modalReturnFocus?.isConnected)modalReturnFocus.focus();const done=modalOnClose;modalOnClose=null;done?.(); }
+  function pickPlaybackSource(sources){
+    if(sources.length<=1)return Promise.resolve(sources[0]||null);
+    return new Promise(resolve=>{
+      let selected=null;
+      showModal(`<h2>Calidad y audio</h2><p>Elige una opción para comenzar.</p><div class="tv-source-options">${sources.map((source,index)=>`<button class="btn tv-source-option" data-source-index="${index}"><span>${esc(source.name||'Original')}</span>${source.size?`<small>${esc(source.size)}</small>`:''}</button>`).join('')}</div><div class="m-actions"><button class="btn" id="sourceCancel">Cancelar</button></div>`,()=>{
+        $('#modalLayer .modal-card').setAttribute('aria-label','Calidad y audio');
+        $$('#modalLayer [data-source-index]').forEach(button=>button.onclick=()=>{selected=sources[Number(button.dataset.sourceIndex)];closeModal();});
+        $('#sourceCancel').onclick=closeModal;
+      },()=>resolve(selected));
+    });
+  }
+  function pickSelect(select){
+    const options=Array.from(select.options).filter(option=>!option.disabled);
+    if(!options.length)return;
+    const title=select.getAttribute('aria-label')||select.labels?.[0]?.firstChild?.textContent.trim()||'Elegir opción';
+    showModal(`<h2>${esc(title)}</h2><div class="tv-source-options">${options.map((option,index)=>`<button class="btn tv-source-option" data-option-index="${index}" aria-pressed="${option.selected}"><span>${esc(option.text)}</span>${option.selected?'<small>Actual</small>':''}</button>`).join('')}</div><div class="m-actions"><button class="btn" id="selectCancel">Cancelar</button></div>`,()=>{
+      $('#modalLayer .modal-card').setAttribute('aria-label',title);
+      $$('#modalLayer [data-option-index]').forEach(button=>button.onclick=()=>{select.value=options[Number(button.dataset.optionIndex)].value;closeModal();select.dispatchEvent(new Event('change',{bubbles:true}));});
+      $('#selectCancel').onclick=closeModal;
+    });
+    $('#modalLayer [aria-pressed="true"]')?.focus();
+  }
+  $('#modalLayer').addEventListener('click', (e) => { if (e.target.id === 'modalLayer') closeModal(); });
+
+  /* ============================ Inicialización ============================ */
+  function init() {
+    applyTextScale();content().tabIndex=-1;
+    $$('.nav-item').forEach(button=>button.setAttribute('aria-label',button.textContent.trim()));
+    document.addEventListener('keydown',event=>{
+      const layer=$('#modalLayer');if(layer.classList.contains('hidden'))return;
+      if(event.key==='Escape'){event.preventDefault();event.stopImmediatePropagation();closeModal();}
+      else if(event.key==='Tab'){const buttons=$$('button,input,select,textarea,[tabindex="0"]',layer).filter(node=>!node.disabled);const first=buttons[0],last=buttons[buttons.length-1];if(event.shiftKey&&document.activeElement===first){event.preventDefault();last?.focus();}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first?.focus();}}
+    },true);
+    document.addEventListener('error', event => {
+      const image = event.target;
+      if (image.tagName !== 'IMG') return;
+      image.style.display = 'none';
+      image.parentElement?.querySelector('.ph')?.classList.remove('hidden');
+    }, true);
+    $('#tbBack').onclick = back;
+    /* Pastilla que sigue al ratón en la barra superior */
+  (() => {
+    const scroller = document.querySelector('#sidebar .sidebar-scroll');
+    if (!scroller) return;
+    const pill = document.createElement('span');
+    pill.className = 'nav-hover-pill';
+    scroller.prepend(pill);
+    const move = (element) => {
+      const box = scroller.getBoundingClientRect();
+      const rect = element.getBoundingClientRect();
+      pill.style.width = rect.width + 'px';
+      pill.style.transform = 'translate(' + (rect.left - box.left) + 'px, -50%)';
+      pill.style.opacity = '1';
+    };
+    scroller.querySelectorAll('.nav-item, .nav-categories button').forEach((element) => {
+      element.addEventListener('mouseenter', () => move(element));
+      element.addEventListener('focus', () => move(element));
+    });
+    scroller.addEventListener('mouseleave', () => { pill.style.opacity = '0'; });
+    scroller.addEventListener('mouseover', (event) => { if (event.target.closest('.nav-panel')) pill.style.opacity = '0'; });
+  })();
+
+  if ($('#tbMenu')) $('#tbMenu').onclick = toggleDrawer;
+    if ($('#drawerBackdrop')) $('#drawerBackdrop').onclick = closeDrawer;
+    if ($('#tbSearchClear')) $('#tbSearchClear').onclick = () => {
+      if (currentView === 'search' && $('#searchClear')) {
+        $('#searchClear').click();
+      } else {
+        go('search', { q: '' });
+      }
+    };
+    if ($('#tbSearchBtn')) $('#tbSearchBtn').onclick = async () => {
+      if(currentView!=='search')await go('search');
+      const input=$('#searchInput');
+      if(input){input.focus();if(tvInterface())input.click();}
+    };
+    if ($('#tbFilterBtn')) $('#tbFilterBtn').onclick = () => {
+      if (currentView === 'browse' && $('#browseFiltersToggle')) {
+        $('#browseFiltersToggle').click();
+        content().scrollTo({ top: 0, behavior: 'smooth' });
+      } else {
+        const cat = currentRoute?.params?.category || (homeFilter === 'tv' ? 'series' : 'movies');
+        go('browse', { category: cat, filtersOpen: true });
+      }
+    };
+    if ($('#tbReloadBtn')) $('#tbReloadBtn').onclick = () => {
+      API.invalidate();
+      toast('Actualizando catálogo…');
+      if (currentRoute) activateRoute(currentRoute);
+    };
+    document.addEventListener('keydown', event => { if (event.altKey && event.key === 'ArrowLeft' && $('#modalLayer').classList.contains('hidden')) { event.preventDefault(); back(); } });
+    document.addEventListener('keydown', event => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); if (!$('#modalLayer').classList.contains('hidden')) return; go('search'); $('#searchInput')?.focus(); } });
+    Platform.onWindowState(() => {});
+    Platform.onDownloadProgress(async (d) => {
+      if (currentView === 'downloads') {
+        // refresco ligero de la tarjeta activa
+        const card = $(`.dl-card[data-id="${d.id}"]`);
+        if (card && (d.status === 'descargando' || d.status === 'preparando')) {
+          const bar = card.querySelector('.dl-bar');
+          const pct = d.totalBytes ? Math.round((d.bytes / d.totalBytes) * 100) : 0;
+          if (!bar) card.insertAdjacentHTML('afterbegin', `<div class="dl-bar"><div style="width:${pct}%"></div></div>`);
+          else bar.firstElementChild.style.width = pct + '%';
+          const infos = card.querySelectorAll('.dl-info span');
+          if (infos[1]) infos[1].textContent = `${fmtBytes(d.bytes)}${d.totalBytes ? ' / ' + fmtBytes(d.totalBytes) : ''}`;
+          if (infos[2]) infos[2].textContent = `${fmtBytes(d.speed)}/s`;
+        } else if (currentView === 'downloads') {
+          renderDownloads();
+        }
+      }
+    });
+
+    $$('.nav-item').forEach((b) => b.addEventListener('click', () => go(b.dataset.view,b.dataset.view==='browse'?{category:'movies'}:{})));
+    $$('[data-category-nav]').forEach(button=>button.onclick=()=>go('browse',{category:button.dataset.categoryNav}));
+    window.addEventListener('hashchange', () => {
+      const h = location.hash.slice(1);
+      if (!h) return;
+      const match = /^(movie|tv)=([1-9]\d*)$/.exec(h);
+      if (match && Number.isSafeInteger(Number(match[2]))) go(match[1], { id: Number(match[2]) });
+    });
+
+    // Chips de género (delegación única)
+    document.addEventListener('click', (e) => {
+      const chip = e.target.closest('button[data-genre-id]');
+      if (chip) loadGenre(Number(chip.dataset.genreId));
+    });
+
+    // Ventana
+    $('#btnMin').onclick = () => Platform.minimize();
+    $('#btnMax').onclick = () => Platform.maximizeToggle();
+    $('#btnClose').onclick = () => Platform.closeWindow();
+    Platform.isMaximized().then((m) => $('#btnMax').textContent = m ? '❐' : '▢');
+
+    // Precarga de catálogos externos al arrancar (en silencio)
+    if (Store.settings.catalogUrls.length || Store.settings.builtinCatalog !== false) {
+      API.loadCatalogs(Store.settings.catalogUrls).then((r) => {
+        if (r.errors.length) toast(`Catálogo: ${r.errors[0]}`);
+      });
+    }
+
+    Player.init();
+    if(typeof SourceConnection!=='undefined')SourceConnection.ensure().catch(()=>{});
+    go('home');
+    if(typeof AppUpdates!=='undefined')AppUpdates.start();
+  }
+
+  if(!document.readyState||document.readyState==='loading')document.addEventListener('DOMContentLoaded', init);else init();
+
+  return { go, back, toast, toastAction, resumeItem, pickPlaybackSource, pickSelect };
+})();
+
