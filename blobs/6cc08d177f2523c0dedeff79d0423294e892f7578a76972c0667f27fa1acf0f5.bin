@@ -1,0 +1,92 @@
+'use strict';
+const Player=(()=>{
+ let active=false,phase="idle",epoch=0;
+ function cancelPending(){if(phase!=="preparing")return;epoch++;active=false;phase="idle";}
+ function normalizeSources(rawUrls, primaryUrl){
+  const seen=new Set();
+  const list=[];
+  for(const src of (rawUrls||[])){
+   if(!src||!src.url)continue;
+   const u=String(src.url).trim();
+   if(!u||seen.has(u))continue;
+   seen.add(u);
+   list.push({...src,url:u,name:String(src.name||'Original').trim()||'Original'});
+  }
+  if(primaryUrl&&!seen.has(primaryUrl)){
+   list.unshift({url:primaryUrl,name:'Original'});
+  }
+  const counts=new Map();
+  for(const s of list){
+   const key=s.name.toUpperCase();
+   counts.set(key,(counts.get(key)||0)+1);
+  }
+  const indices=new Map();
+  const labeled=list.map(s=>{
+   const key=s.name.toUpperCase();
+   if((counts.get(key)||0)<=1)return s;
+   const idx=(indices.get(key)||0)+1;
+   indices.set(key,idx);
+   return {...s,name:`${s.name} · Opción ${idx}`};
+  });
+  if(!primaryUrl)return labeled;
+  const chosen=labeled.find(s=>s.url===primaryUrl);
+  return chosen?[chosen,...labeled.filter(s=>s.url!==primaryUrl)]:labeled;
+ }
+ function save(data){
+  if(!data?.id||!(data.duration>0))return;
+  Store.saveResume(data.type,data.id,{type:data.type,id:data.id,title:data.title,poster:data.poster,kind:data.kind,catalogUrl:data.catalogUrl,season:data.season||0,episode:data.episode||0,position:data.position,duration:data.duration});
+  if(data.type==='tv'&&data.season&&data.episode&&data.position/data.duration>=0.85&&!Store.isEpisodeWatched('tv',data.id,data.season,data.episode)){
+   Store.toggleWatchedEpisode('tv',data.id,data.season,data.episode);
+  }
+ }
+ window.addEventListener('movieplusProgress',event=>save(event.detail));
+ return {
+  init(){},
+  isPlaying:()=>active,
+  async open(item){
+   if(active)return;
+   active=true;phase="preparing";const token=++epoch;
+   let playNext=false;
+   try{
+    await AndroidNative.flush();if(token!==epoch)return;
+    const saved=Store.getResume(item.type,item.id,item.season||0,item.episode||0);
+    const skip=item.type==='tv'?Store.getSkip('tv',item.id,item.season||0,item.episode||0):null;
+    let sources=normalizeSources(item.urls,item.url);
+    const playbackMode=MoviePlusCore.qualityMode(item.playbackMode||Store.settings.playbackMode);
+    if(playbackMode==='manual'&&document.body.classList.contains('platform-tv')&&sources.length>1&&!item.resumeDirect){
+     const selected=await App.pickPlaybackSource(sources);
+     if(!selected||token!==epoch)return;
+     item={...item,url:selected.url};sources=normalizeSources(sources,selected.url);
+    }
+    if(token!==epoch)return;phase='native';
+    const result=await AndroidNative.call('player.open',{
+     ...item,playbackMode,
+     nextEpisode:undefined,
+     nextEpisodeLabel:item.nextEpisode?.label||null,
+     skipConfigured:!!MoviePlusCore.introRange(skip),
+     skipStart:skip?Number(skip.start)||0:0,
+     skipEnd:skip?Number(skip.end)||0:0,
+     autoNext:Store.settings.autoNext!==false,
+     position:saved?.position||0,
+     speed:Store.settings.defaultSpeed||1,
+     subFontSize:Store.settings.subFontSize||22,
+     sources
+    });
+    if(result?.playbackMode&&item.kind!=='local')Store.setSetting("playbackMode",MoviePlusCore.qualityMode(result.playbackMode));
+    if(result?.introEdited){if(result.introMarker)Store.setSkip(item.type,item.id,item.season||0,item.episode||0,result.introMarker.start,result.introMarker.end);else Store.removeSkip(item.type,item.id,item.season||0,item.episode||0);}
+    save(result);
+    playNext=Boolean(result?.playNext&&typeof item.nextEpisode?.open==='function');
+    await AndroidNative.flush();
+   }catch(error){
+    if(token===epoch)App.toast(error.message||'No se pudo reproducir');
+   }finally{
+    if(token===epoch){active=false;phase="idle";}
+   }
+   if(playNext)setTimeout(()=>item.nextEpisode.open(),60);
+  },
+  cancelPending,
+  close(){cancelPending();},
+  toast:message=>App.toast(message),
+  loadSubtitleFromUrl(){App.toast('Usa el selector de subtítulos del reproductor nativo.');}
+ };
+})();
