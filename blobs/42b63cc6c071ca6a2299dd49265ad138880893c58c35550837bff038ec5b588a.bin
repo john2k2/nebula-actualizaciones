@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src * data: blob:; media-src * data: blob:; connect-src *; font-src 'self' data:; worker-src blob:;" />
+  <title>Nébula</title>
+  <link rel="stylesheet" href="styles.css" />
+<link rel="stylesheet" href="tv.css" /><link rel="stylesheet" href="phone.css" /></head>
+<body>
+  <svg class="icon-defs" aria-hidden="true"><defs>
+    <symbol id="i-home" viewBox="0 0 24 24"><path d="m3 10 9-7 9 7v10H3Z M9 20v-7h6v7"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></symbol>
+    <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v1a7 7 0 0 0 14 0v-1M12 18v4M8 22h8"/></symbol>
+    <symbol id="i-heart" viewBox="0 0 24 24"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8L12 21l8.8-8.6a5.5 5.5 0 0 0 0-7.8Z"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.5"/><path d="m9 3 1-2h4l1 2 3 2 2 1v4l-2 2v3l1 3-3 3-3-1h-3l-3 1-3-3 1-3v-3l-2-2V6l2-1Z" transform="translate(1 1) scale(.9)"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="m9 5 11 7-11 7Z"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14"/></symbol>
+    <symbol id="i-cast" viewBox="0 0 24 24"><path d="M3 8V4h18v15h-8M3 19h.01M3 15a4 4 0 0 1 4 4M3 11a8 8 0 0 1 8 8"/></symbol>
+    <symbol id="i-audio" viewBox="0 0 24 24"><path d="M5 15H2V9h3l5-5v16Zm9-7a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14"/></symbol>
+    <symbol id="i-quality" viewBox="0 0 24 24"><rect x="2" y="5" width="20" height="14" rx="3"/><path d="M7 9v6m4-6v6m-4-3h4m4-3h2a3 3 0 0 1 0 6h-2Z"/></symbol>
+    <symbol id="i-cc" viewBox="0 0 24 24"><rect x="2" y="5" width="20" height="14" rx="3"/><path d="M10 9H7v6h3m7-6h-3v6h3"/></symbol>
+    <symbol id="i-back" viewBox="0 0 24 24"><path d="m12 5-7 7 7 7M5 12h15"/></symbol>
+    <symbol id="i-full" viewBox="0 0 24 24"><path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m4 12 5 5L20 6"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 2"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24"><path d="m10 14 4-4M9 17l-2 2a4 4 0 0 1-6-6l5-5a4 4 0 0 1 6 0m0 8a4 4 0 0 0 6 0l5-5a4 4 0 0 0-6-6l-2 2"/></symbol>
+    <symbol id="i-film" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 3v18M17 3v18M3 8h4m10 0h4M3 16h4m10 0h4M7 12h10"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10h.01"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 6h7l2 3h9v11H3Z"/></symbol>
+    <symbol id="i-muted" viewBox="0 0 24 24"><path d="M5 15H2V9h3l5-5v16Zm10-6 6 6m0-6-6 6"/></symbol>
+    <symbol id="i-rewind" viewBox="0 0 24 24"><path d="M11 5 6 9l5 4"/><path d="M6 9h6a6 6 0 1 1-4.24 10.24"/></symbol>
+    <symbol id="i-forward" viewBox="0 0 24 24"><path d="m13 5 5 4-5 4"/><path d="M18 9h-6a6 6 0 1 0 4.24 10.24"/></symbol>
+    <symbol id="i-menu" viewBox="0 0 24 24"><path d="M3 6h18M3 12h18M3 18h18"/></symbol>
+    <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="9" cy="6" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="10" cy="18" r="2"/></symbol>
+    <symbol id="i-reload" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36L21 8"/><path d="M21 3v5h-5"/></symbol>
+    <symbol id="i-tv" viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="14" rx="2"/><path d="m8 2 4 4 4-4"/></symbol>
+    <symbol id="i-anime" viewBox="0 0 24 24"><path d="m12 3 2.4 5.2L20 9.3l-4 4.1.9 5.6-4.9-2.7-4.9 2.7.9-5.6-4-4.1 5.6-1.1Z"/></symbol>
+    <symbol id="i-dorama" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 10h.01M15 10h.01M9 15c1.5 1.5 4.5 1.5 6 0"/></symbol>
+    <symbol id="i-duanju" viewBox="0 0 24 24"><rect x="6" y="2" width="12" height="20" rx="2.5"/><path d="M11 18h2M10 8l5 3-5 3Z"/></symbol>
+    <symbol id="i-telenovela" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><circle cx="16" cy="9" r="2.8"/><path d="M3 19c0-3 2.7-5.5 6-5.5s6 2.5 6 5.5M14.5 19c.3-2.3 2.1-4 4.5-4 1.2 0 2 .4 2 4"/></symbol>
+    <symbol id="i-pip" viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="16" rx="2"/><rect x="12" y="11" width="8" height="7" rx="1"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9.5 7V4.6h5V7M6.6 7l.8 12.4h9.2L17.4 7M10 10.4v6.2M14 10.4v6.2"/></symbol>
+</defs></svg>
+  <div id="titlebar">
+    <button id="tbMenu" class="toolbar-menu" title="Abrir menú" aria-label="Abrir menú"><svg class="icon" aria-hidden="true"><use href="#i-menu"/></svg></button>
+    <button id="tbBack" class="toolbar-back" title="Volver atrás (Alt + ←)" aria-label="Volver atrás" disabled><svg class="icon"><use href="#i-back"/></svg></button>
+    <div class="tb-brand">
+      <svg viewBox="0 0 24 24" class="tb-logo"><circle cx="12" cy="12" r="10" fill="#ff1717"/><path d="M10 8l6 4-6 4V8z" fill="#fff"/></svg>
+      <span>Nébula</span>
+    </div>
+    <div class="tb-title" id="tbTitle">Películas</div>
+    <div class="tb-quick">
+      <button id="tbSearchClear" class="tb-icon-btn tb-clear hidden" title="Limpiar búsqueda" aria-label="Limpiar búsqueda"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button>
+      <button id="tbSearchBtn" class="tb-icon-btn" title="Buscar (Ctrl + K)" aria-label="Buscar"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg></button>
+      <button id="tbFilterBtn" class="tb-icon-btn" title="Filtros y orden" aria-label="Filtros y orden"><svg class="icon" aria-hidden="true"><use href="#i-sliders"/></svg></button>
+      <button id="tbReloadBtn" class="tb-icon-btn" title="Recargar catálogo" aria-label="Recargar catálogo"><svg class="icon" aria-hidden="true"><use href="#i-reload"/></svg></button>
+    </div>
+    <div class="tb-actions">
+      <button id="btnMin" title="Minimizar" aria-label="Minimizar">−</button>
+      <button id="btnMax" title="Maximizar" aria-label="Maximizar"></button>
+      <button id="btnClose" title="Cerrar" aria-label="Cerrar">×</button>
+    </div>
+  </div>
+
+  <div id="drawerBackdrop" class="drawer-backdrop hidden" aria-hidden="true"></div>
+  <div id="shell">
+    <nav id="sidebar" aria-label="Navegación principal">
+      <div class="drawer-header">
+        <div class="drawer-logo">
+          <svg viewBox="0 0 24 24" class="tb-logo"><circle cx="12" cy="12" r="10" fill="#ff1717"/><path d="M10 8l6 4-6 4V8z" fill="#fff"/></svg>
+          <div><strong>Nébula</strong><small>v 1.9.2</small></div>
+        </div>
+      </div>
+      <div class="sidebar-scroll">
+      <div class="nav-label">EXPLORAR</div>
+      <button class="nav-item active" data-view="home"><svg class="icon" aria-hidden="true"><use href="#i-home"/></svg><span>Inicio</span></button>
+      <button class="nav-item" data-view="browse"><svg class="icon" aria-hidden="true"><use href="#i-film"/></svg><span>Explorar</span></button>
+      <details class="nav-group" id="navCatalog">
+        <summary class="nav-trigger"><span>Catálogo</span></summary>
+        <div class="nav-panel nav-categories" aria-label="Categorías del catálogo">
+        <button data-category-nav="movies"><svg class="icon" aria-hidden="true"><use href="#i-film"/></svg><span>Películas</span></button>
+        <button data-category-nav="series"><svg class="icon" aria-hidden="true"><use href="#i-tv"/></svg><span>Series</span></button>
+        <button data-category-nav="anime"><svg class="icon" aria-hidden="true"><use href="#i-anime"/></svg><span>Anime</span></button>
+        <button data-category-nav="cartoons"><svg class="icon" aria-hidden="true"><use href="#i-anime"/></svg><span>Cartoons</span></button>
+        <button data-category-nav="doramas"><svg class="icon" aria-hidden="true"><use href="#i-dorama"/></svg><span>Doramas</span></button>
+        <button data-category-nav="duanju"><svg class="icon" aria-hidden="true"><use href="#i-duanju"/></svg><span>Duanju</span></button>
+        <button data-category-nav="telenovelas"><svg class="icon" aria-hidden="true"><use href="#i-telenovela"/></svg><span>Telenovelas</span></button>
+        </div>
+      </details>
+      <button class="nav-item" data-view="search"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><span>Buscar</span></button>
+      <details class="nav-group" id="navLibrary">
+        <summary class="nav-trigger"><span>Biblioteca</span></summary>
+        <div class="nav-panel" aria-label="Tu biblioteca">
+          <button class="nav-item" data-view="mylist"><svg class="icon" aria-hidden="true"><use href="#i-heart"/></svg><span>Favoritos e Historial</span></button>
+          <button class="nav-item nav-downloads" data-view="downloads"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg><span>Descargas</span></button>
+        </div>
+      </details>
+      <button class="nav-item" data-view="settings"><svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg><span>Ajustes</span></button>
+      </div>
+      <div class="sidebar-foot">
+        <div class="library-avatar">N</div><div><strong>Nébula</strong><span>Sin anuncios · Catálogo activo</span></div>
+      </div>
+    </nav>
+
+    <main id="content"></main>
+  </div>
+
+  <!-- Reproductor (pantalla completa sobre el shell) -->
+  <div id="playerLayer" class="hidden">
+    <video id="videoEl"></video>
+    <canvas id="videoCanvas"></canvas>
+    <div id="playerUi">
+      <div id="pTop">
+        <button id="pBack" title="Volver (Esc)" aria-label="Volver"><svg class="icon"><use href="#i-back"/></svg></button>
+        <div class="player-heading"><span>AHORA REPRODUCIENDO</span><div id="pTitle" class="p-title"></div></div>
+        <div class="p-top-actions">
+          <button id="pInfo" class="player-tool" title="Diagnóstico de reproducción"><svg class="icon" aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 11v6M12 7v1" stroke="currentColor" stroke-width="1.7"/></svg><span>Info</span></button>
+          <div class="p-menu-wrap"><button id="pQuality" class="player-tool" title="Calidad"><svg class="icon" aria-hidden="true"><use href="#i-quality"/></svg><span>Calidad</span></button><div class="p-menu hidden" id="pQualityMenu"></div></div>
+          <div class="p-menu-wrap"><button id="pAudio" class="player-tool" title="Pistas de audio"><svg class="icon" aria-hidden="true"><use href="#i-audio"/></svg><span>Audio</span></button><div class="p-menu hidden" id="pAudioMenu"></div></div>
+          <div class="p-menu-wrap"><button id="pTracks" class="player-tool" title="Subtítulos"><svg class="icon" aria-hidden="true"><use href="#i-cc"/></svg><span>Subtítulos</span></button><div class="p-menu hidden" id="pTracksMenu"></div></div>
+          <div class="p-menu-wrap"><button id="pCast" class="player-tool" title="Transmitir a Chromecast"><svg class="icon" aria-hidden="true"><use href="#i-cast"/></svg><span>Transmitir</span></button><div id="pCastMenu" class="p-menu cast-menu hidden"></div></div>
+          <button id="pSubtitleFile" class="player-tool" title="Cargar un archivo de subtítulos" aria-label="Cargar archivo de subtítulos"><svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg><span>Archivo</span></button>
+          <button id="pPip" class="player-tool" title="Picture-in-Picture" aria-label="Picture-in-Picture"><svg class="icon" aria-hidden="true"><use href="#i-pip"/></svg><span>PiP</span></button>
+          <button id="pFull" class="player-tool" title="Pantalla completa (F)" aria-label="Pantalla completa"><svg class="icon" aria-hidden="true"><use href="#i-full"/></svg></button>
+        </div>
+      </div>
+      <div id="castSurface" class="hidden"><svg class="icon"><use href="#i-cast"/></svg><h2>Reproduciendo en tu TV</h2><p id="castDeviceName"></p><button class="btn" id="castReturn">Volver a este equipo</button></div>
+      <div id="playerLoading" class="hidden"><span class="loading-ring"></span><span>Preparando la reproducción</span></div>
+      <div id="pCenter">
+        <button id="pBack10" title="Retroceder 10 segundos (←)"><svg class="icon" aria-hidden="true"><use href="#i-rewind"/></svg><span>10</span></button>
+        <button id="pPlayPause" title="Reproducir/Pausa (Espacio)"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg></button>
+        <button id="pFwd10" title="Adelantar 10 segundos (→)"><span>10</span><svg class="icon" aria-hidden="true"><use href="#i-forward"/></svg></button>
+      </div>
+      <div id="pBottom">
+        <div id="pSeekWrap">
+          <div id="pSeek" role="slider" tabindex="0" aria-label="Posición del video" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="pSeekBuffered"></div><div id="pSeekFill"></div><div id="pSeekThumb"></div></div>
+        </div>
+        <div id="pControls">
+          <div class="p-ctrl-left">
+            <span id="pTime">00:00 / 00:00</span>
+          </div>
+          <div class="p-ctrl-right">
+            <div class="p-menu-wrap">
+              <button id="pSpeed" title="Velocidad">1x</button>
+              <div class="p-menu hidden" id="pSpeedMenu"></div>
+            </div>
+            <div class="p-vol">
+              <button id="pMute" title="Silenciar (M)"><svg class="icon" aria-hidden="true"><use href="#i-audio"/></svg></button>
+              <input id="pVolume" aria-label="Volumen" type="range" min="0" max="100" value="100" />
+            </div>
+          </div>
+        </div>
+      </div>
+      <button id="pSkipIntro" class="hidden">Saltar intro ▸</button>
+      <div id="pSubtitleNotice" class="hidden"></div>
+    </div>
+    <div id="pDialog" class="hidden"></div>
+  </div>
+
+  <!-- Diálogo siguiente capítulo -->
+  <div id="modalLayer" class="hidden"></div>
+  <div id="toast" class="hidden" role="status" aria-live="polite"></div>
+
+<script src="ui-target.js"></script><script src="generated/core.browser.js"></script><script src="generated/ui.browser.js"></script><script src="android-bootstrap.js"></script><script src="android-start.js"></script><script src="tv-navigation.js"></script></body>
+</html>

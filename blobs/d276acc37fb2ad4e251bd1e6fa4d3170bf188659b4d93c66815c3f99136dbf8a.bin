@@ -1,0 +1,779 @@
+"use strict";
+var MoviePlusCore = (() => {
+  var __defProp = Object.defineProperty;
+  var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+  var __getOwnPropNames = Object.getOwnPropertyNames;
+  var __hasOwnProp = Object.prototype.hasOwnProperty;
+  var __export = (target, all) => {
+    for (var name in all)
+      __defProp(target, name, { get: all[name], enumerable: true });
+  };
+  var __copyProps = (to, from, except, desc) => {
+    if (from && typeof from === "object" || typeof from === "function") {
+      for (let key2 of __getOwnPropNames(from))
+        if (!__hasOwnProp.call(to, key2) && key2 !== except)
+          __defProp(to, key2, { get: () => from[key2], enumerable: !(desc = __getOwnPropDesc(from, key2)) || desc.enumerable });
+    }
+    return to;
+  };
+  var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
+
+  // packages/core/src/index.ts
+  var index_exports = {};
+  __export(index_exports, {
+    CATALOG_CATEGORIES: () => CATALOG_CATEGORIES,
+    GENRES: () => GENRES,
+    MediaIdentity: () => MediaIdentity,
+    PROFILE_SCHEMA: () => PROFILE_SCHEMA,
+    PROFILE_SCHEMA_VERSION: () => PROFILE_SCHEMA_VERSION,
+    SourceAvailability: () => SourceAvailability,
+    SourceCatalog: () => SourceCatalog,
+    browseCatalog: () => browseCatalog,
+    browseKey: () => browseKey,
+    catalogCategory: () => catalogCategory,
+    catalogGenres: () => catalogGenres,
+    catalogMediaType: () => catalogMediaType,
+    catalogUpdated: () => catalogUpdated,
+    choosePlaybackSource: () => choosePlaybackSource,
+    classifyPlaybackError: () => classifyPlaybackError,
+    completeSearch: () => completeSearch,
+    createMediaSession: () => createMediaSession,
+    createNavigation: () => createNavigation,
+    createPlaybackLaunchGate: () => createPlaybackLaunchGate,
+    createPlaybackLeases: () => createPlaybackLeases,
+    createPlaybackState: () => createPlaybackState,
+    createSourceRegistry: () => createSourceRegistry,
+    createUserStore: () => createUserStore,
+    genreRequest: () => genreRequest,
+    moviePlusGenreIds: () => moviePlusGenreIds,
+    orderItems: () => orderItems,
+    qualityMode: () => qualityMode,
+    relevance: () => relevance,
+    selectPlaybackSource: () => selectPlaybackSource,
+    snapshot: () => snapshot,
+    sourceCodec: () => sourceCodec,
+    sourceHeight: () => sourceHeight,
+    topQualities: () => topQualities
+  });
+
+  // packages/core/src/media-identity.ts
+  var normalizeTitle = (value) => String(value || "").replace(/\s*\(\d{4}(?:-\d{2}-\d{2})?\)\s*$/, "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  function year(item) {
+    const match = String(item.year || item.date || "").match(/^(\d{4})(?:$|[-/])/);
+    return match ? match[1] : null;
+  }
+  function names(item) {
+    return [...new Set([item.title, item.originalTitle, ...item.aliases || [], ...String(item.othersNames || "").split("|")].map(normalizeTitle).filter(Boolean))];
+  }
+  function identities(item) {
+    const result = (item.identities || []).filter((identity) => identity && identity.providerId && identity.id !== void 0 && identity.id !== null);
+    if (item.kind === "tmdb") return [...result, { providerId: "tmdb", id: String(item.id) }];
+    if (item.kind === "nebula") return [...result, { providerId: "nebula", id: String(item.nebulaId || String(item.id).replace(/^nebula:/, "")) }];
+    return result;
+  }
+  function compare(a, b) {
+    if ((a.type === "movie" || a.type === "tv") && (b.type === "movie" || b.type === "tv") && a.type !== b.type) return "different";
+    const left = identities(a), right = identities(b);
+    for (const one of left) for (const two of right) if (one.providerId === two.providerId && String(one.id) === String(two.id)) return "id";
+    if (left.some((one) => right.some((two) => one.providerId === two.providerId))) return "different";
+    if (!year(a) || year(a) !== year(b)) return "different";
+    return names(a).some((name) => names(b).includes(name)) ? "title-year" : "different";
+  }
+  function selectMatch(target, candidates) {
+    const confirmed = candidates.filter((item) => compare(target, item) === "id");
+    if (confirmed.length) return confirmed.length === 1 ? confirmed[0] : null;
+    const fallback = candidates.filter((item) => compare(target, item) === "title-year");
+    return fallback.length === 1 ? fallback[0] : null;
+  }
+  function nebulaType(raw) {
+    if (String(raw.source_type) === "0") return "tv";
+    if (String(raw.source_type) === "1") return "movie";
+    if (raw.media_type === "movie" || raw.media_type === "tv") return raw.media_type;
+    if (raw.programType === "teleplay" || raw.seasons?.length) return "tv";
+    if (raw.programType === "movie") return "movie";
+    return "unknown";
+  }
+  function episodeKey(mediaId, season, episode) {
+    if (!mediaId || !Number.isInteger(season) || season < 0 || !Number.isInteger(episode) || episode < 1) throw Error("Identidad de cap\xEDtulo inv\xE1lida");
+    return JSON.stringify([String(mediaId), season, episode]);
+  }
+  function key(item) {
+    const list = identities(item), identity = list.find((identity2) => identity2.providerId === "tmdb") || list[0];
+    return identity ? JSON.stringify([identity.providerId, item.type || "unknown", String(identity.id)]) : null;
+  }
+  var MediaIdentity = { normalizeTitle, year, names, identities, compare, selectMatch, nebulaType, episodeKey, key };
+
+  // packages/core/src/source-availability.ts
+  function failure(providerId, error) {
+    const detail = typeof error === "object" && error !== null ? error : {};
+    const code = String(detail.code || "").toLowerCase(), message2 = String(detail.message || "No se pudo consultar el proveedor");
+    const legacyExpired = /sesi[oó]n (?:ya no est[aá] activa|vencida|expirad)|session.*expired/i.test(message2);
+    const state = code === "session_expired" || legacyExpired ? "session_expired" : "temporary_error";
+    return { providerId, state, sources: [], error: message2, code: code || state };
+  }
+  function aggregate(results) {
+    const sources = results.flatMap((result) => result.sources || []), warnings = results.filter((result) => ["session_expired", "temporary_error"].includes(result.state));
+    const state = sources.length ? "available" : warnings.some((result) => result.state === "session_expired") ? "session_expired" : warnings.length ? "temporary_error" : results.some((result) => result.state === "loading") ? "loading" : results.some((result) => result.state === "unknown") || !results.length ? "unknown" : "unavailable";
+    return { state, sources, warnings };
+  }
+  function message(result) {
+    switch (result?.state) {
+      case "available":
+        return "Fuentes disponibles";
+      case "loading":
+        return "Consultando fuentes\u2026";
+      case "session_expired":
+        return "La sesi\xF3n de una fuente venci\xF3. Recon\xE9ctala en Ajustes.";
+      case "temporary_error":
+        return "No se pudieron consultar todas las fuentes. Puedes reintentar.";
+      case "unavailable":
+        return "No hay fuentes confirmadas para este t\xEDtulo.";
+      default:
+        return "La disponibilidad de las fuentes a\xFAn no est\xE1 confirmada.";
+    }
+  }
+  var SourceAvailability = { failure, aggregate, message };
+
+  // packages/core/src/catalog-service.ts
+  function topQualities(sources) {
+    const rank = (source) => {
+      const name = String(source.name || "").toUpperCase(), k = name.match(/\b([248])K\b/), p = name.match(/\b(\d{3,4})P?\b/);
+      return k ? Number(k[1]) * 540 : p ? Number(p[1]) : 0;
+    };
+    const unique = /* @__PURE__ */ new Map();
+    for (const source of sources || []) {
+      const key2 = String(source.name || "Original").trim().toUpperCase();
+      if (!unique.has(key2)) unique.set(key2, source);
+    }
+    return [...unique.values()].sort((a, b) => rank(b) - rank(a)).slice(0, 3);
+  }
+  function create({ providers, identity = MediaIdentity, availability = SourceAvailability, topQualities: select = topQualities }) {
+    const ids = /* @__PURE__ */ new Set();
+    for (const provider of providers) {
+      if (ids.has(provider.id)) throw Error("Proveedor repetido");
+      ids.add(provider.id);
+    }
+    async function search(query, selected = providers.map((provider) => provider.id)) {
+      return Promise.all(providers.filter((provider) => selected.includes(provider.id)).map(async (provider) => {
+        try {
+          return { providerId: provider.id, items: provider.search ? await provider.search(query) : [], state: "available" };
+        } catch (error) {
+          return { ...availability.failure(provider.id, error), items: [] };
+        }
+      }));
+    }
+    async function listSources(item) {
+      const results = await Promise.all(providers.map(async (provider) => {
+        if (!provider.listSources || provider.supports && !provider.supports(item)) return { providerId: provider.id, state: "unknown", sources: [] };
+        try {
+          return { providerId: provider.id, ...await provider.listSources(item) };
+        } catch (error) {
+          return availability.failure(provider.id, error);
+        }
+      }));
+      const state = availability.aggregate(results), seen = /* @__PURE__ */ new Set();
+      const allSources = state.sources.filter((source) => {
+        if (!source.url || seen.has(source.url)) return false;
+        seen.add(source.url);
+        return true;
+      });
+      return { ...state, allSources, sources: select(allSources), providers: results };
+    }
+    return { search, match: identity.selectMatch, listSources, capabilities: () => providers.map(({ id, capabilities }) => ({ id, ...capabilities })) };
+  }
+  var SourceCatalog = { create, topQualities };
+
+  // packages/core/src/source-registry.ts
+  function createSourceRegistry(providers) {
+    const ids = /* @__PURE__ */ new Set();
+    for (const provider of providers) {
+      if (!provider.id || ids.has(provider.id) || typeof provider.accepts !== "function" || typeof provider.resolve !== "function") throw Error("Proveedor de fuentes inv\xE1lido o repetido");
+      ids.add(provider.id);
+    }
+    return {
+      async resolve(reference, { signal } = {}) {
+        if (typeof reference !== "string" || !reference.trim()) throw Error("La referencia de video est\xE1 vac\xEDa");
+        signal?.throwIfAborted();
+        const provider = providers.find((candidate) => candidate.accepts(reference));
+        if (!provider) throw Error("No hay proveedor para esta fuente");
+        const ticket = await provider.resolve(reference, { signal });
+        try {
+          signal?.throwIfAborted();
+          if (!ticket || !/^(?:https?:\/\/[^\s/]+(?:[/?#]|$)|file:\/\/\/)/i.test(ticket.url)) throw Error("El proveedor devolvi\xF3 un protocolo de video inv\xE1lido");
+          return { ...ticket, providerId: provider.id };
+        } catch (error) {
+          if (provider.release && ticket) await provider.release(ticket).catch(() => {
+          });
+          throw error;
+        }
+      },
+      async release(ticket) {
+        const provider = providers.find((candidate) => candidate.id === ticket?.providerId);
+        if (provider?.release) await provider.release(ticket);
+      }
+    };
+  }
+
+  // packages/core/src/playback-leases.ts
+  function createPlaybackLeases(registry) {
+    const leases = /* @__PURE__ */ new Map(), owners = /* @__PURE__ */ new Map(), epochs = /* @__PURE__ */ new Map();
+    let sequence = 0;
+    async function release(id) {
+      const entry = leases.get(id);
+      if (!entry) return;
+      leases.delete(id);
+      if (owners.get(entry.owner) === id) owners.delete(entry.owner);
+      await registry.release(entry.ticket);
+    }
+    async function releaseOwner(owner) {
+      epochs.set(owner, (epochs.get(owner) || 0) + 1);
+      const id = owners.get(owner);
+      if (id) await release(id);
+    }
+    async function resolve(reference, { owner = "player", signal } = {}) {
+      const epoch = (epochs.get(owner) || 0) + 1;
+      epochs.set(owner, epoch);
+      const previous = owners.get(owner);
+      if (previous) await release(previous);
+      const ticket = await registry.resolve(reference, { signal });
+      if (epochs.get(owner) !== epoch || signal?.aborted) {
+        await registry.release(ticket);
+        const error = Error("Solicitud de reproducci\xF3n cancelada");
+        error.name = "AbortError";
+        throw error;
+      }
+      const leaseId = "ticket-" + ++sequence;
+      leases.set(leaseId, { owner, ticket });
+      owners.set(owner, leaseId);
+      return { ...ticket, leaseId };
+    }
+    async function releaseAll() {
+      for (const owner of epochs.keys()) epochs.set(owner, epochs.get(owner) + 1);
+      await Promise.allSettled([...leases.keys()].map(release));
+    }
+    return { resolve, release, releaseOwner, releaseAll, activeCount: () => leases.size };
+  }
+
+  // packages/core/src/use-cases.ts
+  function choosePlaybackSource(result, previous) {
+    return result.allSources.find((source) => source.url === previous) || result.sources[0];
+  }
+  function createMediaSession(ports, listSources) {
+    return {
+      async play(item, position = 0) {
+        const { allSources } = await listSources(item);
+        if (!allSources.length) throw Error("No hay fuentes confirmadas para este t\xEDtulo.");
+        const ticket = await ports.playback.resolve(allSources[0].url);
+        return { ticket, sources: allSources, position: Math.max(0, position) };
+      },
+      save(key2, entry) {
+        ports.storage.write(key2, JSON.stringify(entry));
+      },
+      async resume(key2) {
+        const raw = ports.storage.read(key2);
+        if (!raw) return null;
+        const entry = JSON.parse(raw);
+        return this.play(entry.identity, entry.position);
+      },
+      close: () => ports.playback.release(),
+      pickLocal: () => ports.files.pickVideo(),
+      discover: () => ports.cast.discover()
+    };
+  }
+
+  // packages/core/src/user-store.ts
+  var clone = (data) => JSON.parse(JSON.stringify(data));
+  function parseData(json) {
+    const value = JSON.parse(json);
+    if (typeof value !== "object" || value === null || Array.isArray(value)) throw Error("JSON inv\xE1lido");
+    for (const name of ["settings", "favorites", "history", "resume", "skipTimes", "watchedEpisodes", "seenItems"]) {
+      const field = value[name];
+      if (field !== void 0 && (typeof field !== "object" || field === null || Array.isArray(field))) throw Error("Datos de perfil inv\xE1lidos");
+    }
+    return value;
+  }
+  function createUserStore(storage, history, defaults) {
+    const KEY = "movp_clone_store_v1";
+    let historyQueue = Promise.resolve();
+    function changeDownloadHistory(change) {
+      const next = historyQueue.then(async () => {
+        const list = await history.list();
+        change(list);
+        await history.save(list);
+      });
+      historyQueue = next.catch(() => {
+      });
+      return next;
+    }
+    let data = load();
+    let persisted = JSON.stringify(data);
+    function load() {
+      const raw = storage.read(KEY);
+      try {
+        if (!raw) return clone(defaults);
+        const parsed = parseData(raw);
+        return {
+          ...clone(defaults),
+          ...parsed,
+          settings: { ...defaults.settings, ...parsed.settings || {} }
+        };
+      } catch {
+        return clone(defaults);
+      }
+    }
+    function save() {
+      const next = JSON.stringify(data);
+      try {
+        storage.write(KEY, next);
+        persisted = next;
+      } catch (error) {
+        data = JSON.parse(persisted);
+        throw error;
+      }
+    }
+    const keyOf = (type, id, season = 0, episode = 0) => `${type}:${id}:${season}:${episode}`;
+    return {
+      /* Ajustes */
+      get settings() {
+        return data.settings;
+      },
+      setSetting(k, v) {
+        data.settings[k] = v;
+        save();
+      },
+      /* Favoritos */
+      isFavorite(type, id) {
+        return !!data.favorites[`${type}:${id}`];
+      },
+      toggleFavorite(item) {
+        const k = `${item.type}:${item.id}`;
+        if (data.favorites[k]) {
+          delete data.favorites[k];
+          save();
+          return false;
+        }
+        data.favorites[k] = { ...item, addedAt: Date.now() };
+        save();
+        return true;
+      },
+      get favorites() {
+        return Object.entries(data.favorites).map(([, v]) => v).sort((a, b) => b.addedAt - a.addedAt);
+      },
+      /* Visto / marcado */
+      markWatched(type, id, info = {}) {
+        data.seenItems[`${type}:${id}`] = { ...info, at: Date.now() };
+        save();
+      },
+      isWatched(type, id) {
+        return !!data.seenItems[`${type}:${id}`];
+      },
+      get watchedTitlesList() {
+        return Object.entries(data.seenItems).sort((a, b) => b[1].at - a[1].at).map(([k, info]) => {
+          const [type, ...parts] = k.split(":");
+          const id = parts.join(":");
+          const fav = data.favorites[k] || (info.title ? info : null);
+          if (type === "local") {
+            const file = id.replace(/^local:/, "");
+            return { type, id, title: fav?.title || file.split(/[\\/]/).pop(), source: info.source || "file:///" + file.replace(/\\/g, "/"), kind: "local", poster: null };
+          }
+          return { type, id, title: fav ? fav.title : `TMDB ${id}`, poster: fav ? fav.poster : null, year: fav ? fav.year : "", kind: fav ? fav.kind : "tmdb", catalogUrl: fav ? fav.catalogUrl : "" };
+        });
+      },
+      get watchedEpisodesList() {
+        return Object.keys(data.watchedEpisodes).map((k) => {
+          const [type, ...parts] = k.split(":");
+          const e = parts.pop(), s = parts.pop(), id = parts.join(":");
+          const fav = data.favorites[`${type}:${id}`];
+          return { seriesId: id, seriesTitle: fav ? fav.title : null, season: s, episode: e, still: null };
+        });
+      },
+      toggleWatchedEpisode(type, id, s, e) {
+        const k = `${type}:${id}:${s}:${e}`;
+        if (data.watchedEpisodes[k]) {
+          delete data.watchedEpisodes[k];
+        } else {
+          data.watchedEpisodes[k] = true;
+        }
+        save();
+        return !!data.watchedEpisodes[k];
+      },
+      isEpisodeWatched(type, id, s, e) {
+        return !!data.watchedEpisodes[`${type}:${id}:${s}:${e}`];
+      },
+      /* Reanudar (ResumePlaybackDialogFragment del original) */
+      getResume(type, id, s = 0, e = 0) {
+        return data.resume[keyOf(type, id, s, e)] || null;
+      },
+      saveResume(type, id, info) {
+        const k = keyOf(type, id, info.season || 0, info.episode || 0);
+        data.resume[k] = { ...info, type, id, updatedAt: Date.now() };
+        const entries = Object.entries(data.resume);
+        if (entries.length > 400) {
+          entries.sort((a, b) => a[1].updatedAt - b[1].updatedAt).slice(0, entries.length - 400).forEach(([k2]) => delete data.resume[k2]);
+        }
+        save();
+      },
+      removeResume(type, id, s = 0, e = 0) {
+        if (!s && !e && type === "tv") {
+          const prefix = `${type}:${id}:`;
+          for (const k of Object.keys(data.resume)) if (k.startsWith(prefix)) delete data.resume[k];
+        } else {
+          delete data.resume[keyOf(type, id, s, e)];
+        }
+        save();
+      },
+      clearResume() {
+        data.resume = {};
+        save();
+      },
+      clearWatchHistory() {
+        data.resume = {};
+        data.seenItems = {};
+        save();
+      },
+      get resumeList() {
+        const sorted = Object.entries(data.resume).map(([k, v]) => {
+          if (v.type && v.id !== void 0 && v.id !== "") return v;
+          const parts = k.split(":");
+          const kType = parts.shift() || "movie";
+          const kEp = Number(parts.pop()) || 0;
+          const kSeason = Number(parts.pop()) || 0;
+          const kId = parts.join(":");
+          return { ...v, type: v.type || kType, id: v.id || kId, season: v.season ?? kSeason, episode: v.episode ?? kEp };
+        }).filter((r) => r.position > 20 && r.duration && r.position / r.duration < 0.95).sort((a, b) => b.updatedAt - a.updatedAt);
+        const seenSeries = /* @__PURE__ */ new Set();
+        return sorted.filter((r) => {
+          const seriesKey = `${r.type}:${r.id}`;
+          if (seenSeries.has(seriesKey)) return false;
+          seenSeries.add(seriesKey);
+          return true;
+        });
+      },
+      /* Historial de búsqueda (SearchHistoryDatabase del original) */
+      addSearch(q) {
+        data.searchHistory = [q, ...data.searchHistory.filter((x) => x !== q)].slice(0, 30);
+        save();
+      },
+      get searchHistory() {
+        return data.searchHistory;
+      },
+      clearSearchHistory() {
+        data.searchHistory = [];
+        save();
+      },
+      /* Salto de intro (comunidad local — sin servidor) */
+      getSkip(type, id, s, e) {
+        return data.skipTimes[`${type}:${id}:${s}:${e}`] || null;
+      },
+      setSkip(type, id, s, e, start, end) {
+        data.skipTimes[`${type}:${id}:${s}:${e}`] = { start, end };
+        save();
+      },
+      /* Historial de descargas */
+      async addDownloadHistory(entry) {
+        if (history.mutate) return history.mutate({ kind: "upsert", id: entry.id, value: entry });
+        return changeDownloadHistory((list) => {
+          const previous = list.find((x) => x.id === entry.id);
+          if (previous) Object.assign(previous, { ...entry, ...previous });
+          else list.push({ ...entry, at: Date.now() });
+        });
+      },
+      async updateDownloadHistory(id, patch) {
+        if (history.mutate) return history.mutate({ kind: "patch", id, value: patch });
+        return changeDownloadHistory((list) => {
+          const it = list.find((x) => x.id === id);
+          if (it) Object.assign(it, patch, { at: Date.now() });
+          else list.push({ id, ...patch, at: Date.now() });
+        });
+      },
+      /* Respaldo (DailyPrefsBackupWorker equivalente) */
+      exportData() {
+        return JSON.stringify(data, null, 2);
+      },
+      reload() {
+        data = load();
+        persisted = JSON.stringify(data);
+      },
+      importData(json) {
+        const parsed = parseData(json);
+        if (!parsed || typeof parsed !== "object") throw new Error("JSON inv\xE1lido");
+        data = { ...clone(defaults), ...parsed, settings: { ...defaults.settings, ...parsed.settings || {} } };
+        save();
+      },
+      reset() {
+        data = clone(defaults);
+        save();
+      },
+      keyOf
+    };
+  }
+
+  // packages/core/src/search.ts
+  function relevance(item, query) {
+    const q = MediaIdentity.normalizeTitle(query), names2 = MediaIdentity.names(item);
+    if (!q) return 4;
+    if (names2.some((name) => name === q)) return 0;
+    if (names2.some((name) => name.startsWith(q + " "))) return 1;
+    if (names2.some((name) => (" " + name + " ").includes(" " + q + " "))) return 2;
+    if (names2.some((name) => name.includes(q))) return 3;
+    const words = q.split(/\s+/);
+    if (names2.some((name) => words.every((word) => name.split(/\s+/).some((token) => token.startsWith(word))))) return 3;
+    return 4;
+  }
+  function completeSearch(primary, backup, query) {
+    const main = [], extra = [];
+    const index = () => {
+      const ids = /* @__PURE__ */ new Map(), names2 = /* @__PURE__ */ new Map();
+      const put = (map, key2, item) => {
+        const rows = map.get(key2) || [];
+        if (!rows.includes(item)) rows.push(item);
+        map.set(key2, rows);
+      };
+      return {
+        add(item) {
+          for (const id of MediaIdentity.identities(item)) put(ids, id.providerId + ":" + id.id, item);
+          const year2 = MediaIdentity.year(item);
+          if (year2) for (const name of MediaIdentity.names(item)) put(names2, year2 + ":" + name, item);
+        },
+        match(item) {
+          const candidates = /* @__PURE__ */ new Set();
+          for (const id of MediaIdentity.identities(item)) for (const row of ids.get(id.providerId + ":" + id.id) || []) candidates.add(row);
+          const year2 = MediaIdentity.year(item);
+          if (year2) for (const name of MediaIdentity.names(item)) for (const row of names2.get(year2 + ":" + name) || []) candidates.add(row);
+          return MediaIdentity.selectMatch(item, [...candidates]);
+        }
+      };
+    };
+    const primaryIndex = index(), backupIndex = index();
+    for (const item of primary) primaryIndex.add(item);
+    const seenMain = /* @__PURE__ */ new Set(), seenExtra = /* @__PURE__ */ new Set();
+    const add = (list, item) => {
+      const seen = list === main ? seenMain : seenExtra, key2 = MediaIdentity.key(item) || item;
+      if (!seen.has(key2)) {
+        seen.add(key2);
+        list.push(item);
+      }
+    };
+    for (const item of primary) if (relevance(item, query) < 4) add(main, item);
+    for (const item of backup) {
+      if (relevance(item, query) >= 4) continue;
+      const match = primaryIndex.match(item);
+      if (match) add(main, match);
+      else if (!backupIndex.match(item)) {
+        add(extra, item);
+        backupIndex.add(item);
+      }
+    }
+    const rank = (left, right) => relevance(left, query) - relevance(right, query);
+    main.sort(rank);
+    extra.sort(rank);
+    return { items: [...main, ...extra], primary: main, backup: extra };
+  }
+
+  // packages/core/src/profile-schema.ts
+  var PROFILE_SCHEMA_VERSION = 1;
+  var PROFILE_SCHEMA = [
+    "CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS preferences (key TEXT PRIMARY KEY,payload TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS media_items (media_key TEXT PRIMARY KEY,media_type TEXT NOT NULL,legacy_id TEXT NOT NULL,payload TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS provider_identities (media_key TEXT NOT NULL,provider_id TEXT NOT NULL,provider_item_id TEXT NOT NULL,PRIMARY KEY(media_key,provider_id,provider_item_id))",
+    "CREATE TABLE IF NOT EXISTS favorites (legacy_key TEXT PRIMARY KEY,media_key TEXT NOT NULL,payload TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS progress (legacy_key TEXT PRIMARY KEY,media_key TEXT NOT NULL,season INTEGER NOT NULL,episode INTEGER NOT NULL,position REAL NOT NULL,duration REAL NOT NULL,payload TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS watched (legacy_key TEXT PRIMARY KEY,media_key TEXT NOT NULL,payload TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS watched_episodes (legacy_key TEXT PRIMARY KEY,media_key TEXT NOT NULL,season INTEGER NOT NULL,episode INTEGER NOT NULL,payload TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS download_history (id TEXT PRIMARY KEY,payload TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS skip_times (legacy_key TEXT PRIMARY KEY,payload TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS search_history (position INTEGER PRIMARY KEY,query TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS catalogs (position INTEGER PRIMARY KEY,payload TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS cache (key TEXT PRIMARY KEY,payload TEXT NOT NULL,expires_at INTEGER NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS legacy_extra (key TEXT PRIMARY KEY,payload TEXT NOT NULL)",
+    "CREATE INDEX IF NOT EXISTS progress_media ON progress(media_key,season,episode)"
+  ];
+
+  // packages/core/src/playback-state.ts
+  function snapshot(position, paused, rate) {
+    return { position: Number.isFinite(position) ? Math.max(0, position) : 0, paused, rate: Number.isFinite(rate) && rate > 0 ? rate : 1 };
+  }
+  function classifyPlaybackError(error) {
+    const message2 = String(error instanceof Error ? error.message : error);
+    return /401|403|expir|venci/i.test(message2) ? "expired" : /network|fetch|timeout|\bred\b|conex|50[234]|ERR_CONNECTION/i.test(message2) ? "network" : /codec|format|DASH|soport/i.test(message2) ? "unsupported" : "unknown";
+  }
+  function createPlaybackState() {
+    let state = "closed", generation = 0, intent = snapshot(0, false, 1);
+    return {
+      get state() {
+        return state;
+      },
+      get intent() {
+        return { ...intent };
+      },
+      begin(next) {
+        intent = { ...next };
+        state = "loading";
+        return ++generation;
+      },
+      accepts(token) {
+        return state !== "closed" && token === generation;
+      },
+      set(next) {
+        if (state !== "closed" || next === "loading") state = next;
+      },
+      wantPaused(paused) {
+        intent.paused = paused;
+      },
+      close() {
+        state = "closed";
+        generation++;
+      }
+    };
+  }
+
+  // packages/core/src/view-state.ts
+  var copy = (route) => ({ ...route, params: JSON.parse(JSON.stringify(route.params)) });
+  function createNavigation() {
+    let current = null;
+    const history = [];
+    return {
+      get current() {
+        return current;
+      },
+      get canBack() {
+        return history.length > 0;
+      },
+      capture(scrollTop, focusKey) {
+        if (current) {
+          current.scrollTop = Math.max(0, scrollTop || 0);
+          current.focusKey = focusKey;
+        }
+      },
+      open(view, params = {}, remember = true) {
+        if (remember && current && (current.view !== view || JSON.stringify(current.params) !== JSON.stringify(params))) history.push(copy(current));
+        current = { view, params: { ...params }, scrollTop: 0, focusKey: "" };
+        return current;
+      },
+      back() {
+        const previous = history.pop();
+        if (!previous) return null;
+        current = previous;
+        return current;
+      }
+    };
+  }
+  var GENRES = [
+    { id: 28, label: "Acci\xF3n", tv: 10759, tvLabel: "Acci\xF3n y aventura" },
+    { id: 12, label: "Aventura", tv: 10759, tvLabel: "Acci\xF3n y aventura" },
+    { id: 16, label: "Animaci\xF3n", tv: 16 },
+    { id: 35, label: "Comedia", tv: 35 },
+    { id: 80, label: "Crimen", tv: 80 },
+    { id: 99, label: "Documental", tv: 99 },
+    { id: 18, label: "Drama", tv: 18 },
+    { id: 10751, label: "Familia", tv: 10751 },
+    { id: 14, label: "Fantas\xEDa", tv: 10765, tvLabel: "Ciencia ficci\xF3n y fantas\xEDa" },
+    { id: 27, label: "Terror", tv: null },
+    { id: 10749, label: "Romance", tv: null },
+    { id: 878, label: "Ciencia ficci\xF3n", tv: 10765, tvLabel: "Ciencia ficci\xF3n y fantas\xEDa" },
+    { id: 53, label: "Suspenso", tv: null },
+    { id: 10752, label: "B\xE9lica", tv: 10768, tvLabel: "Guerra y pol\xEDtica" }
+  ];
+  function genreRequest(id, type) {
+    const genre = GENRES.find((genre2) => genre2.id === id);
+    if (!genre) throw Error("G\xE9nero inv\xE1lido");
+    return { id: type === "movie" ? genre.id : genre.tv, label: type === "movie" ? genre.label : "tvLabel" in genre ? genre.tvLabel : genre.label, notice: type === "tv" && genre.tv === null ? "TMDB no ofrece un g\xE9nero espec\xEDfico de " + genre.label.toLowerCase() + " para series." : type === "tv" && "tvLabel" in genre ? "En series, TMDB agrupa este g\xE9nero como " + genre.tvLabel + "." : "" };
+  }
+  function orderItems(items, order) {
+    return [...items].sort((a, b) => order === "year" ? (Number(b.year) || 0) - (Number(a.year) || 0) : order === "rating" ? (Number(b.rating) || 0) - (Number(a.rating) || 0) : order === "title" ? String(a.title || "").localeCompare(String(b.title || ""), "es") : 0);
+  }
+
+  // packages/core/src/catalog-browse.ts
+  var CATALOG_CATEGORIES = [{ id: "movies", label: "Pel\xEDculas", types: [1] }, { id: "series", label: "Series", types: [2, 8, 9, 10] }, { id: "anime", label: "Anime", types: [3] }, { id: "cartoons", label: "Cartoons", types: [4] }, { id: "doramas", label: "Doramas", types: [6] }, { id: "duanju", label: "Duanju", types: [7] }, { id: "telenovelas", label: "Telenovelas", types: [5] }];
+  function catalogMediaType(rawType, fallback) {
+    const type = Number(rawType);
+    return type >= 2 && type <= 10 ? "tv" : type === 1 ? "movie" : fallback === "series" || fallback === "tv" ? "tv" : "movie";
+  }
+  function catalogCategory(item) {
+    const type = Number(item.catalogType ?? item.raw?.type);
+    const category = CATALOG_CATEGORIES.find((category2) => category2.types.includes(type));
+    return category?.id || (item.type === "movie" ? "movies" : item.type === "tv" ? "series" : "");
+  }
+  var browseKey = (item) => `${item.type}:${item.id}`;
+  function catalogGenres(item) {
+    const value = item.genreIds ?? item.raw?.generos ?? [];
+    return (Array.isArray(value) ? value : String(value).split(/[|,;]+/)).map(String).filter(Boolean);
+  }
+  function catalogUpdated(item) {
+    const n = Number(item.raw?.recent_order);
+    if (Number.isFinite(n) && n > 0) return n;
+    const date = item.raw?.updatedAt ?? item.raw?.updated_at;
+    if (!date) return 0;
+    const t = typeof date === "number" ? date : Date.parse(String(date));
+    return Number.isFinite(t) && t > 0 ? t : 0;
+  }
+  function browseCatalog(items, options) {
+    const favorites = options.favoriteKeys || [], history = options.historyKeys || [], popular = options.popularKeys || [], recommended = options.recommendedKeys || [], preferences = options.preferredGenres || [];
+    const category = options.category === "anime" && options.subtype === "cartoons" ? "cartoons" : options.category;
+    const collection = options.collection || "recent";
+    let filtered = items.filter((item) => catalogCategory(item) === category);
+    if (options.category === "anime" && ["anime", "cartoons"].includes(options.subtype || "")) filtered = filtered.filter((item) => Number(item.catalogType ?? item.raw?.type) === (options.subtype === "anime" ? 3 : 4));
+    filtered = filtered.filter((item) => (!options.genre || catalogGenres(item).includes(options.genre)) && (!options.year || String(item.year || "").slice(0, 4) === options.year) && (!options.quality || new RegExp(options.quality === "4K" ? "(?:\\b4k\\b|2160)" : options.quality === "CAST" ? "\\b(?:cast|castellano)\\b" : options.quality === "1080" ? "1080" : options.quality === "720" ? "720" : options.quality === "IMAX" ? "\\bimax\\b" : "(?!)", "i").test([item.resolutions, ...(item.qualities || []).map((q) => q.name)].join(" "))));
+    if (collection === "favorites") filtered = filtered.filter((item) => favorites.includes(browseKey(item)));
+    if (collection === "history") filtered = filtered.filter((item) => history.includes(browseKey(item)));
+    if (collection === "popular") filtered = filtered.filter((item) => popular.includes(browseKey(item)));
+    if (collection === "recommended") filtered = filtered.filter((item) => recommended.includes(browseKey(item)));
+    if (collection === "updated") filtered = filtered.filter((item) => catalogUpdated(item) > 0);
+    if (collection === "for-you") filtered = filtered.filter((item) => !history.includes(browseKey(item)) && catalogGenres(item).some((g) => preferences.includes(g)));
+    const rank = (item) => collection === "history" ? history.indexOf(browseKey(item)) : collection === "favorites" ? favorites.indexOf(browseKey(item)) : collection === "popular" ? popular.indexOf(browseKey(item)) : collection === "recommended" ? recommended.indexOf(browseKey(item)) : 0;
+    return [...filtered].sort((a, b) => options.order === "title" ? String(a.title || "").localeCompare(String(b.title || ""), "es") : options.order === "rating" ? (Number(b.rating) || 0) - (Number(a.rating) || 0) : options.order === "year" ? (Number(b.year) || 0) - (Number(a.year) || 0) : ["history", "favorites", "popular", "recommended"].includes(collection) ? rank(a) - rank(b) : collection === "updated" ? catalogUpdated(b) - catalogUpdated(a) : collection === "for-you" ? catalogGenres(b).filter((g) => preferences.includes(g)).length - catalogGenres(a).filter((g) => preferences.includes(g)).length : (b.catalogOrder || 0) - (a.catalogOrder || 0));
+  }
+  var MOVIEPLUS_GENRES = { 1: 28, 2: 12, 3: 16, 4: 35, 5: 80, 6: 99, 7: 18, 8: 10751, 9: 14, 10: 36, 11: 27, 12: 10402, 13: 9648, 14: 10749, 15: 878, 16: 10770, 17: 53, 18: 10752, 19: 37, 20: 10759, 21: 10762, 22: 10763, 23: 10764, 24: 10765, 25: 10766, 26: 10767, 27: 10768 };
+  function moviePlusGenreIds(value) {
+    return (Array.isArray(value) ? value : String(value || "").split(/[|,;]+/)).filter((id) => String(id).trim()).map((id) => MOVIEPLUS_GENRES[Number(id)] ?? "source:" + String(id));
+  }
+
+  // packages/core/src/playback-selection.ts
+  function qualityMode(value) {
+    return value === "fixed4k" || value === "manual" ? value : "auto";
+  }
+  function sourceHeight(source) {
+    if (Number.isFinite(source.height) && Number(source.height) > 0) return Number(source.height);
+    const s = String(source.name || "").toLowerCase();
+    if (/\b(?:4k|uhd|2160p?)\b/.test(s)) return 2160;
+    return Number(s.match(/\b(1080|720|576|480|360|240)p?\b/)?.[1]) || 0;
+  }
+  function sourceCodec(source) {
+    const s = String(source.codec || "") + " " + String(source.name || "");
+    return /\b(?:av01|av1)\b/i.test(s) ? "av1" : /\b(?:hevc|h265|h\.265|hvc1|hev1)\b/i.test(s) ? "hevc" : /\b(?:avc|h264|h\.264|avc1)\b/i.test(s) ? "h264" : /\b(?:vp9|vp09)\b/i.test(s) ? "vp9" : void 0;
+  }
+  function selectPlaybackSource(sources, mode, options = {}) {
+    let rows = sources.filter((s) => !options.excluded?.includes(String(s.url)) && (!options.compatible || options.compatible(s)) && (mode !== "fixed4k" || [0, 2160].includes(sourceHeight(s))));
+    if (options.lower && mode === "auto" && options.currentHeight) {
+      const smaller = rows.filter((s) => sourceHeight(s) > 0 && sourceHeight(s) < options.currentHeight);
+      if (smaller.length) rows = smaller;
+    }
+    return [...rows].sort((a, b) => sourceHeight(b) - sourceHeight(a) || (Number(a.bitrate) || Infinity) - (Number(b.bitrate) || Infinity))[0];
+  }
+  function createPlaybackLaunchGate() {
+    let generation = 0, key2 = null;
+    return {
+      begin(value) {
+        if (key2 === value) return null;
+        generation++;
+        key2 = value;
+        return generation;
+      },
+      current(token) {
+        return key2 !== null && generation === token;
+      },
+      complete(token) {
+        if (key2 !== null && generation === token) {
+          generation++;
+          key2 = null;
+        }
+      },
+      cancel() {
+        generation++;
+        key2 = null;
+      }
+    };
+  }
+  return __toCommonJS(index_exports);
+})();
