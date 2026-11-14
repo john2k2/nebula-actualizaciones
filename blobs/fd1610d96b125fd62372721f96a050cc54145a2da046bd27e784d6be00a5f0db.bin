@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="referrer" content="strict-origin-when-cross-origin">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https://www.youtube.com https://s.ytimg.com; frame-src https://www.youtube.com; style-src 'unsafe-inline'; img-src https: data:; connect-src https://www.youtube.com;">
+<title>Tráiler · Nébula</title>
+<style>
+:root{color-scheme:dark;font-family:system-ui,sans-serif;background:#08090c;color:#f7f4f5}*{box-sizing:border-box}body{margin:0;height:100vh;height:100dvh;display:flex;flex-direction:column;background:#08090c}header{display:flex;justify-content:flex-end;height:40px;flex:none;padding:0 8px}button{font:inherit;min-width:40px;min-height:40px;border:0;background:transparent;color:#f7f4f5;cursor:pointer;border-radius:8px}button:hover{background:#38313b}button:focus-visible{outline:2px solid #fff;outline-offset:-3px}main{flex:1;min-height:160px;position:relative;background:#000}#player{position:absolute;inset:0;width:100%;height:100%;border:0}#feedback{padding:16px;text-align:center;color:#c7c2c8}#feedback[hidden]{display:none}#retry{padding:8px 20px;background:#b70920;color:#fff;margin-top:10px}svg{width:20px;height:20px;vertical-align:middle}
+</style></head><body>
+<header><button id="close" aria-label="Cerrar tráiler"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></header>
+<main aria-label="Tráiler de YouTube"><div id="player"></div></main>
+<div id="feedback" hidden><div id="status" role="status" aria-live="polite"></div><button id="retry">Reintentar</button></div>
+<script>
+'use strict';
+const config=__NEBULA_CONFIG__;
+const state={ready:false,status:-1,time:0,duration:0,error:0};window.NebulaTrailer={state,key};
+document.title=config.title+' — Tráiler · Nébula';
+let player,timer,loadTimer;
+const status=document.getElementById('status'),feedback=document.getElementById('feedback'),retry=document.getElementById('retry');
+function close(){if(config.native)location.href='nebula-trailer://close';else window.close();}
+function fail(code){state.error=Number(code)||-1;clearTimeout(loadTimer);status.textContent=[101,150].includes(state.error)?'Este tráiler no permite reproducirse dentro de otras aplicaciones. Podés volver a la ficha.':'No se pudo cargar el tráiler. Comprobá la conexión y reintentá.';feedback.hidden=false;}
+function command(action){if(!state.ready)return;if(action==='play'){state.status===1?player.pauseVideo():player.playVideo();}else player.seekTo(Math.max(0,Math.min(player.getDuration(),player.getCurrentTime()+(action==='forward'?10:-10))),true);}
+document.getElementById('close').onclick=close;retry.onclick=()=>location.reload();
+function key(code){if(code===23||code===66||code===85){command('play');}else if(code===21||code===89){command('rewind');}else if(code===22||code===90){command('forward');}}
+document.addEventListener('keydown',event=>{if(event.key==='Escape'){event.preventDefault();close();return;}const code={ArrowUp:19,ArrowDown:20,ArrowLeft:21,ArrowRight:22,Enter:23,' ':85}[event.key];if(code){event.preventDefault();key(code);}});
+window.onYouTubeIframeAPIReady=()=>{player=new YT.Player('player',{videoId:config.id,playerVars:{autoplay:1,playsinline:1,rel:0,origin:config.origin},events:{onReady(){state.ready=true;state.error=0;feedback.hidden=true;clearTimeout(loadTimer);status.textContent='';player.playVideo();},onStateChange(event){state.status=event.data;if(event.data===1||event.data===2){state.error=0;feedback.hidden=true;status.textContent='';}else if(event.data===3)status.textContent='Cargando tráiler…';else if(event.data===0){status.textContent='Tráiler finalizado';}},onError(event){fail(event.data);},onAutoplayBlocked(){status.textContent='Presioná Reproducir para comenzar.';feedback.hidden=false;retry.hidden=true;}}});};
+const api=document.createElement('script');api.src='https://www.youtube.com/iframe_api';api.onerror=()=>fail(-1);document.head.append(api);loadTimer=setTimeout(()=>{if(!state.ready)fail(-1);},25000);
+timer=setInterval(()=>{if(state.ready){try{state.time=player.getCurrentTime();state.duration=player.getDuration();}catch{}}},500);
+window.addEventListener('pagehide',()=>{clearInterval(timer);clearTimeout(loadTimer);try{player?.destroy();}catch{}});
+</script></body></html>
