@@ -1,0 +1,142 @@
+/* Nébula 1.14.0 — Android móvil e interfaz táctil compacta */
+body.platform-android:not(.platform-tv) {
+  --bg: #07080c;
+  --bg2: #0d0f16;
+  --panel: #171920;
+  --surface-hover: #20232c;
+  --line: #2b2e38;
+  --text: #f6f4f5;
+  --text-secondary: #a9acb9;
+  --muted: #70747f;
+  --accent: #e0142b;
+  --accent-strong: #d80e24;
+  --accent-text: #ff5c6c;
+  --gold: #f5c518;
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+body.platform-android:not(.platform-tv) #titlebar {
+  padding-left: max(10px, env(safe-area-inset-left, 0px));
+  padding-right: max(10px, env(safe-area-inset-right, 0px));
+}
+
+body.platform-android:not(.platform-tv) #content {
+  padding-bottom: 18px;
+}
+
+body.platform-android:not(.platform-tv) .poster .p-title {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  min-height: 2.6em;
+  line-height: 1.3;
+}
+
+body.platform-android:not(.platform-tv) .resume-card-bar > span {
+  background: var(--accent);
+}
+
+body.platform-android:not(.platform-tv) .resume-row,
+body.platform-android:not(.platform-tv) .platforms-row,
+body.platform-android:not(.platform-tv) .tabs,
+body.platform-android:not(.platform-tv) .collection-tabs,
+body.platform-android:not(.platform-tv) .detail-tabs,
+body.platform-android:not(.platform-tv) .seasons-tabs {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+body.platform-android:not(.platform-tv) .resume-row::-webkit-scrollbar,
+body.platform-android:not(.platform-tv) .platforms-row::-webkit-scrollbar,
+body.platform-android:not(.platform-tv) .tabs::-webkit-scrollbar,
+body.platform-android:not(.platform-tv) .collection-tabs::-webkit-scrollbar,
+body.platform-android:not(.platform-tv) .detail-tabs::-webkit-scrollbar,
+body.platform-android:not(.platform-tv) .seasons-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+body.platform-android:not(.platform-tv) .browse-view > .category-links {
+  display: flex;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  gap: 8px;
+  margin: 4px 0 10px;
+  padding: 2px 0 4px;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+body.platform-android:not(.platform-tv) .browse-view > .category-links::-webkit-scrollbar {
+  display: none;
+}
+
+body.platform-android:not(.platform-tv) .browse-view > .category-links button {
+  flex: 0 0 auto;
+  min-height: 44px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  font-size: 0.86rem;
+  white-space: nowrap;
+}
+
+body.platform-android:not(.platform-tv) .browse-category-mobile {
+  display: none !important;
+}
+
+body.platform-android:not(.platform-tv) .q-badge {
+  font-size: 10px !important;
+  padding: 2px 5px !important;
+}
+
+body.platform-android:not(.platform-tv) .feature-spotlight {
+  border-radius: 16px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+body.platform-android:not(.platform-tv) .feature-shade {
+  background: linear-gradient(180deg, rgba(7, 8, 12, 0.25) 0%, rgba(7, 8, 12, 0.72) 48%, rgba(7, 8, 12, 0.98) 100%);
+}
+
+body.platform-android:not(.platform-tv) .feature-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+body.platform-android:not(.platform-tv) .feature-actions .btn {
+  min-height: 48px;
+}
+
+body.platform-android:not(.platform-tv) .platform-card {
+  min-width: 118px;
+  height: 60px;
+  padding: 10px 14px;
+}
+
+body.platform-android:not(.platform-tv) .row-head h2 {
+  font-size: 1.08rem;
+  letter-spacing: -0.01em;
+}
+
+@media (max-width: 600px) {
+  body.platform-android:not(.platform-tv) .feature-spotlight { min-height: 0; }
+  body.platform-android:not(.platform-tv) .feature-copy { max-width: 100%; width: 100%; padding: 20px 18px; }
+  body.platform-android:not(.platform-tv) .feature-copy h2 { font-size: 1.55rem; }
+  body.platform-android:not(.platform-tv) .feature-copy > p { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+  body.platform-android:not(.platform-tv) .grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px 10px; }
+  body.platform-android:not(.platform-tv) .platform-hero { padding: 14px; gap: 12px; }
+  body.platform-android:not(.platform-tv) .platform-controls { width: 100%; justify-content: space-between; }
+  body.platform-android:not(.platform-tv) .resume-row { display: flex; overflow-x: auto; padding: 4px 0 10px; }
+  body.platform-android:not(.platform-tv) .resume-card { flex: 0 0 88%; width: 88%; min-width: 0; max-width: 88%; padding: 12px; }
+  body.platform-android:not(.platform-tv)[data-flex-gap="unsupported"] .resume-card { margin-right: 12px; }
+  body.platform-android:not(.platform-tv) .resume-card-art { flex: 0 0 84px; width: 84px; min-width: 84px; height: 126px; }
+  body.platform-android:not(.platform-tv)[data-flex-gap="unsupported"] .resume-card-art { margin-right: 12px; }
+  body.platform-android:not(.platform-tv) .resume-card-body { flex: 1; min-width: 0; justify-content: center; }
+  body.platform-android:not(.platform-tv) .resume-card-title { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; white-space: normal; font-size: 16px; line-height: 1.3; }
+  body.platform-android:not(.platform-tv) .resume-card-meta { margin-top: 8px; font-size: 13px; line-height: 1.4; }
+  body.platform-android:not(.platform-tv) .d-actions { gap: 10px; }
+  body.platform-android:not(.platform-tv) .d-actions .btn { min-height: 48px; }
+}
