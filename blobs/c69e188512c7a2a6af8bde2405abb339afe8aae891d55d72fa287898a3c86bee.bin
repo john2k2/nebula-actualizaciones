@@ -1,0 +1,22 @@
+(function(root,factory){if(typeof module==='object'&&module.exports)module.exports=factory;else root.SourceConnection=factory((command,params)=>Platform.nebulaCall(command,params));})(typeof globalThis!=='undefined'?globalThis:this,function(invoke,now=Date.now){
+ let pending=null,generation=0,lastAttempt=-Infinity,ready=false;
+ function reconnect(force=false){
+  if(pending)return pending;
+  if(!force&&now()-lastAttempt<60000)return Promise.reject(Error('La conexión se volverá a intentar en un momento.'));
+  lastAttempt=now();pending=Promise.resolve().then(()=>invoke('session.reconnect',{})).then(value=>{generation++;ready=true;return value;}).finally(()=>{pending=null;});return pending;
+ }
+ async function call(command,params={}){
+  if(command==='session.reconnect')return reconnect(true);
+  if(pending){try{await pending;}catch{}}
+  const started=generation;
+  try{const out=await invoke(command,params);ready=true;return out;}catch(error){
+   const nativeReconnectHint=error.message==='La fuente adicional no respondió. Reconéctala en Ajustes si su sesión venció.';
+   if(!nativeReconnectHint&&!['session_required','session_expired'].includes(error.code)&&!/sesión.*(?:venc|no está activa)|conecta la fuente.*sesión/i.test(error.message||''))throw error;
+   ready=false;
+   if(started===generation)await reconnect();
+   const out=await invoke(command,params);ready=true;return out;
+  }
+ }
+ async function ensure(){const status=await invoke('runtime.status',{});if(status.configured){if(status.requiresReconnect)await reconnect();ready=true;}else{ready=false;}return status;}
+ return {call,ensure,reconnect,isReady:()=>ready};
+});
