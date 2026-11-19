@@ -1,0 +1,400 @@
+/* Nébula — celular (Android e iOS). Diseño del canvas «Nébula · pantallas».
+   Las WebView antiguas (Chrome 83) no entienden :has(), aspect-ratio ni gap en flex:
+   aquí se usan grid y márgenes. Las reglas compartidas viven en styles.css. */
+body.platform-android:not(.platform-tv) {
+  --bg: #07080c;
+  --bg2: #0d0f16;
+  --panel: #171920;
+  --raised: #20232c;
+  --card-art: #1c1e27;
+  --surface-hover: #20232c;
+  --line: #2b2e38;
+  --outline: #343744;
+  --track: #3a3c46;
+  --text: #f6f4f5;
+  --text-meta: #d6d8e2;
+  --text-secondary: #a9acb9;
+  --muted: #70747f;
+  --accent: #e0142b;
+  --accent-strong: #d80e24;
+  --accent-text: #ff5c6c;
+  --gold: #f5c518;
+  --chip-fill: rgba(255, 255, 255, 0.14);
+  --badge-fill: rgba(7, 8, 12, 0.82);
+}
+
+body.platform-android:not(.platform-tv) .resume-row,
+body.platform-android:not(.platform-tv) .platforms-row,
+body.platform-android:not(.platform-tv) .tabs,
+body.platform-android:not(.platform-tv) .collection-tabs,
+body.platform-android:not(.platform-tv) .detail-tabs,
+body.platform-android:not(.platform-tv) .seasons-tabs {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+body.platform-android:not(.platform-tv) .resume-row::-webkit-scrollbar,
+body.platform-android:not(.platform-tv) .platforms-row::-webkit-scrollbar,
+body.platform-android:not(.platform-tv) .tabs::-webkit-scrollbar,
+body.platform-android:not(.platform-tv) .collection-tabs::-webkit-scrollbar,
+body.platform-android:not(.platform-tv) .detail-tabs::-webkit-scrollbar,
+body.platform-android:not(.platform-tv) .seasons-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+body.platform-android:not(.platform-tv) .browse-view > .category-links {
+  display: flex;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  margin: 4px 0 10px;
+  padding: 2px 0 4px;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+body.platform-android:not(.platform-tv) .browse-view > .category-links::-webkit-scrollbar {
+  display: none;
+}
+
+body.platform-android:not(.platform-tv) .browse-view > .category-links button {
+  flex: 0 0 auto;
+  min-height: 44px;
+  margin-right: 8px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  font-size: 0.86rem;
+  white-space: nowrap;
+}
+
+body.platform-android:not(.platform-tv) .browse-category-mobile {
+  display: none !important;
+}
+
+body.platform-android:not(.platform-tv) .q-badge {
+  font-size: 10px !important;
+  padding: 2px 5px !important;
+}
+
+body.platform-android:not(.platform-tv) .platform-card {
+  min-width: 118px;
+  height: 60px;
+  padding: 10px 14px;
+}
+
+/* Logo de plataforma: necesita alto explícito (con width:auto la WebView antigua lo dibuja en 0 × 0). */
+body.platform-android:not(.platform-tv) .platform-logo svg {
+  width: auto;
+  height: 24px;
+  max-width: 96px;
+  max-height: none;
+}
+
+/* Tablets (más de 760 px): conservan la disposición anterior hasta su propio rediseño. */
+@media (min-width: 761px) {
+  body.platform-android:not(.platform-tv) { padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); }
+  body.platform-android:not(.platform-tv) #titlebar { padding-left: max(10px, env(safe-area-inset-left, 0px)); padding-right: max(10px, env(safe-area-inset-right, 0px)); }
+  body.platform-android:not(.platform-tv) .poster .p-title { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-height: 2.6em; line-height: 1.3; }
+  body.platform-android:not(.platform-tv) .feature-spotlight { border-radius: 16px; overflow: hidden; border: 1px solid rgba(255, 255, 255, 0.1); }
+  body.platform-android:not(.platform-tv) .feature-shade { background: linear-gradient(180deg, rgba(7, 8, 12, 0.25) 0%, rgba(7, 8, 12, 0.72) 48%, rgba(7, 8, 12, 0.98) 100%); }
+  body.platform-android:not(.platform-tv) .feature-actions .btn { min-height: 48px; }
+  body.platform-android:not(.platform-tv) .row-head h2 { font-size: 1.08rem; letter-spacing: -0.01em; }
+}
+
+@media (max-width: 600px) {
+  body.platform-android:not(.platform-tv) .grid { grid-template-columns: repeat(3, minmax(0, 1fr)); grid-gap: 16px 12px; }
+  body.platform-android:not(.platform-tv) .platform-hero { padding: 14px; }
+  body.platform-android:not(.platform-tv) .platform-controls { width: 100%; justify-content: space-between; }
+  body.platform-android:not(.platform-tv) .d-actions .btn { min-height: 48px; }
+}
+
+@media (max-width: 760px) {
+  /* Cabecera: marca y avatar. En Inicio flota sobre el destacado y toma fondo al desplazarse. */
+  body.platform-android:not(.platform-tv) #titlebar{position:absolute;top:0;left:0;right:0;z-index:50;min-height:56px;padding:env(safe-area-inset-top,0px) max(6px,env(safe-area-inset-right,0px)) 0 max(16px,env(safe-area-inset-left,0px));background:rgba(7,8,12,.97);border-bottom:0;box-shadow:none;transition:background-color .2s ease}
+  body.platform-android:not(.platform-tv)[data-view="home"]:not(.content-scrolled) #titlebar{background:linear-gradient(180deg,rgba(7,8,12,.72) 0%,rgba(7,8,12,0) 100%)}
+  body.platform-android:not(.platform-tv) #shell{padding-top:var(--phone-header-h,56px)}
+  body.platform-android:not(.platform-tv)[data-view="home"] #shell{padding-top:0}
+  /* Explorar, Buscar, Biblioteca y Ajustes empiezan con su propio título: sin la cabecera de la marca. */
+  body.platform-android:not(.platform-tv)[data-view="browse"] #titlebar,
+  body.platform-android:not(.platform-tv)[data-view="search"] #titlebar,
+  body.platform-android:not(.platform-tv)[data-view="mylist"] #titlebar,
+  body.platform-android:not(.platform-tv)[data-view="downloads"] #titlebar,
+  body.platform-android:not(.platform-tv)[data-view="settings"] #titlebar{display:none}
+  body.platform-android:not(.platform-tv)[data-view="browse"] #shell,
+  body.platform-android:not(.platform-tv)[data-view="search"] #shell,
+  body.platform-android:not(.platform-tv)[data-view="mylist"] #shell,
+  body.platform-android:not(.platform-tv)[data-view="downloads"] #shell,
+  body.platform-android:not(.platform-tv)[data-view="settings"] #shell{padding-top:env(safe-area-inset-top,0px)}
+  body.platform-android:not(.platform-tv) .phone-bottom-nav button:focus{outline:none;box-shadow:none}
+  body.platform-android:not(.platform-tv) #titlebar .toolbar-menu,
+  body.platform-android:not(.platform-tv) #phoneSettingsBtn,
+  body.platform-android:not(.platform-tv) .phone-profile-pill #phoneProfileName{display:none}
+  body.platform-android:not(.platform-tv) .phone-brand-badge{font-size:19px;font-weight:900;letter-spacing:.06em;line-height:1}
+  body.platform-android:not(.platform-tv) .phone-brand-mark{width:28px;height:28px;margin-right:7px}
+  body.platform-android:not(.platform-tv) .phone-profile-pill{width:44px;height:44px;min-width:44px;min-height:44px;max-width:none;padding:0;border:0;border-radius:22px;background:transparent;justify-content:center}
+  body.platform-android:not(.platform-tv) .phone-profile-avatar{width:36px;height:36px;border-radius:18px;background:var(--panel);color:var(--text);font-size:14px;font-weight:700}
+
+  body.platform-android:not(.platform-tv) #content{padding-bottom:24px}
+  body.platform-android:not(.platform-tv) #content > .view{padding-left:16px;padding-right:16px}
+  body.platform-android:not(.platform-tv) #content > .home-view{padding-top:0}
+
+  /* Destacado a sangre: arte de 300 px (más el área del sistema en iOS), título, metadatos y acciones. */
+  body.platform-android:not(.platform-tv) .feature-spotlight{position:relative;display:block;height:auto;min-height:0;margin:0 -16px 4px;padding:0;border:0;border-radius:0;background:var(--bg);overflow:hidden;box-shadow:none}
+  body.platform-android:not(.platform-tv) .feature-spotlight .feature-art{position:absolute;top:0;left:0;right:auto;width:100%;height:calc(300px + env(safe-area-inset-top,0px));object-fit:cover;object-position:center 20%;opacity:1;filter:none;border-radius:0;-webkit-mask-image:none;mask-image:none}
+  body.platform-android:not(.platform-tv) .feature-spotlight .feature-shade{position:absolute;top:calc(120px + env(safe-area-inset-top,0px));left:0;right:0;bottom:auto;height:181px;background:linear-gradient(0deg,var(--bg) 8%,rgba(7,8,12,.15) 100%)}
+  body.platform-android:not(.platform-tv) .feature-copy{position:relative;width:auto;max-width:none;padding:calc(214px + env(safe-area-inset-top,0px)) 16px 0;margin:0;background:none}
+  body.platform-android:not(.platform-tv) .feature-copy h2{margin:0 0 10px;font-size:28px;line-height:32px;font-weight:800;letter-spacing:0;text-shadow:none}
+  body.platform-android:not(.platform-tv) .feature-meta{display:flex;flex-wrap:wrap;align-items:center;margin:0 0 6px;font-size:13px;line-height:20px;color:var(--text-meta)}
+  body.platform-android:not(.platform-tv) .feature-meta > span{margin:0 10px 4px 0;padding:0;background:none;border:0}
+  body.platform-android:not(.platform-tv) .feature-meta > span::before,
+  body.platform-android:not(.platform-tv) .feature-meta > span::after{content:none;display:none}
+  body.platform-android:not(.platform-tv) .feature-meta > span:first-child{padding:3px 8px;border-radius:5px;background:var(--chip-fill);color:var(--text);font-size:12px;line-height:16px;font-weight:700}
+  body.platform-android:not(.platform-tv) .feature-meta .feature-rating{color:var(--text);font-weight:700}
+  body.platform-android:not(.platform-tv) .feature-meta .feature-quality,
+  body.platform-android:not(.platform-tv) .feature-meta .feature-runtime,
+  body.platform-android:not(.platform-tv) .feature-meta .feature-genre ~ .feature-genre ~ .feature-genre{display:none}
+  body.platform-android:not(.platform-tv) .feature-meta .feature-genre{margin-right:0;color:var(--text-secondary)}
+  body.platform-android:not(.platform-tv) .feature-meta .feature-genre + .feature-genre::before{content:"·";display:inline;position:static;width:auto;height:auto;margin:0 5px;padding:0;border:0;border-radius:0;background:none;color:var(--text-secondary);opacity:1}
+  body.platform-android:not(.platform-tv) .feature-copy p{margin:0;max-width:none;font-size:14px;line-height:20px;color:var(--text-meta);display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+  body.platform-android:not(.platform-tv) .feature-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));grid-gap:8px;margin:14px 0 0;padding:0}
+  body.platform-android:not(.platform-tv) .feature-actions .btn{width:100%;min-height:48px;margin:0;padding:11px 12px;justify-content:center;border:1px solid transparent;border-radius:10px;background:var(--panel);color:var(--text);font-size:15px;font-weight:500;box-shadow:none}
+  body.platform-android:not(.platform-tv) .feature-actions .btn .icon{width:18px;height:18px;margin-right:8px}
+  body.platform-android:not(.platform-tv) .feature-actions .btn.primary,
+  body.platform-android:not(.platform-tv) .feature-actions:not(.has-play) #featureDetails{grid-column:1 / -1;background:var(--accent);font-weight:700}
+  body.platform-android:not(.platform-tv) .feature-actions.has-play #featureDetails{display:none}
+  body.platform-android:not(.platform-tv) .feature-actions .feature-trailer.hidden + #featureFav{grid-column:1 / -1}
+  body.platform-android:not(.platform-tv) .feature-actions #featureFav.danger-ghost{color:var(--accent-text)}
+
+  /* Encabezados de fila */
+  body.platform-android:not(.platform-tv) #content .row-head{margin:22px 0 10px;padding:0}
+  body.platform-android:not(.platform-tv) #content .row-head h2{font-size:17px;line-height:22px;font-weight:700;letter-spacing:0}
+
+  /* Seguir viendo: tarjeta de 280 × 104 con arte 2:3, contexto, progreso y minutos restantes. */
+  body.platform-android:not(.platform-tv) .resume-row{display:grid;grid-auto-flow:column;grid-auto-columns:280px;grid-gap:12px;overflow-x:auto;margin:0 -16px;padding:0 16px 4px;scroll-padding:16px}
+  body.platform-android:not(.platform-tv) .resume-list .resume-card,
+  body.platform-android:not(.platform-tv) .resume-row .resume-card{display:flex;align-items:stretch;flex:none;width:280px;max-width:none;height:104px;min-height:0;margin:0;padding:0;border:0;border-radius:12px;background:var(--panel);overflow:hidden;text-align:left;box-shadow:none;transform:none}
+  body.platform-android:not(.platform-tv) .resume-card .resume-card-art{flex:0 0 69px;width:69px;min-width:69px;height:104px;margin:0;border-radius:0;background:var(--card-art)}
+  /* Biblioteca · Continuar: las mismas tarjetas, a todo el ancho y apiladas. */
+  body.platform-android:not(.platform-tv) .resume-list .resume-card{width:100%;height:108px;margin:0 0 12px}
+  body.platform-android:not(.platform-tv) .resume-list .resume-card .resume-card-art{flex-basis:72px;width:72px;min-width:72px;height:108px}
+  body.platform-android:not(.platform-tv) .resume-card .resume-card-art img{display:block;width:100%;height:100%;object-fit:cover;border-radius:0}
+  body.platform-android:not(.platform-tv) .resume-card .resume-card-play,
+  body.platform-android:not(.platform-tv) .resume-card .resume-card-meta{display:none}
+  body.platform-android:not(.platform-tv) .resume-card .resume-card-body{display:flex;flex-direction:column;justify-content:flex-start;flex:1 1 auto;min-width:0;padding:10px 14px}
+  body.platform-android:not(.platform-tv) .resume-card .resume-card-title{margin:0 0 5px;font-size:14px;line-height:18px;font-weight:700;color:var(--text);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;white-space:normal}
+  body.platform-android:not(.platform-tv) .resume-card .resume-card-ctx{display:block;font-size:12px;line-height:16px;color:var(--text-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  body.platform-android:not(.platform-tv) .resume-card .resume-card-bar{display:block;width:auto;height:4px;margin:auto 0 0;border-radius:2px;background:var(--track);overflow:hidden}
+  body.platform-android:not(.platform-tv) .resume-card .resume-card-bar > span{display:block;height:100%;border-radius:2px;background:var(--accent)}
+  body.platform-android:not(.platform-tv) .resume-card .resume-card-left{display:block;margin-top:5px;font-size:11px;line-height:14px;color:var(--muted)}
+
+  /* Filas de pósters de 112 px: puntaje sobre el arte, título en una línea y año · tipo. */
+  body.platform-android:not(.platform-tv) .row-scroll{display:grid;grid-auto-flow:column;grid-auto-columns:112px;grid-gap:12px;overflow-x:auto;margin:0 -16px;padding:0 16px 4px;scroll-padding:16px;scrollbar-width:none}
+  body.platform-android:not(.platform-tv) .row-scroll::-webkit-scrollbar{display:none}
+  body.platform-android:not(.platform-tv) .row-scroll .poster{width:112px;min-width:0;max-width:none;margin:0;flex:none}
+  body.platform-android:not(.platform-tv) #content .poster .poster-art{position:relative;width:100%;height:0;padding-top:150%;border-radius:10px;background:var(--card-art);overflow:hidden;box-shadow:none}
+  body.platform-android:not(.platform-tv) #content .poster .poster-art > img{position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;border-radius:0}
+  body.platform-android:not(.platform-tv) #content .poster .poster-art > .ph{position:absolute;top:0;left:0;right:0;bottom:0}
+  body.platform-android:not(.platform-tv) #content .poster .poster-play{display:none}
+  body.platform-android:not(.platform-tv) #content .poster .poster-flags{top:7px;left:7px;right:auto}
+  body.platform-android:not(.platform-tv) #content .poster .poster-score{display:inline-flex;align-items:center;position:absolute;top:7px;right:7px;z-index:2;padding:3px 6px;border-radius:6px;background:var(--badge-fill);color:var(--text);font-size:11px;line-height:14px;font-weight:700}
+  body.platform-android:not(.platform-tv) #content .poster .poster-score .star{margin-right:3px;color:var(--gold)}
+  body.platform-android:not(.platform-tv) #content .poster .poster-info{padding:0;text-align:left;align-items:stretch}
+  body.platform-android:not(.platform-tv) #content .poster .poster-title-plain,
+  body.platform-android:not(.platform-tv) #content .poster .poster-meta{text-align:left}
+  body.platform-android:not(.platform-tv) #content .poster .poster-info .q-badges,
+  body.platform-android:not(.platform-tv) #content .poster .poster-info .p-title{display:none}
+  body.platform-android:not(.platform-tv) #content .poster .poster-title-plain{display:block;margin-top:10px;padding:0 2px;font-size:13px;line-height:16px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  body.platform-android:not(.platform-tv) #content .poster .poster-meta{display:block;margin-top:2px;padding:0 2px;font-size:11px;line-height:14px;color:var(--muted)}
+
+  /* Explorar: título y botón de filtros, chips de categoría, resumen y grilla de 3 columnas.
+     El orden visual se arma con flex + order para no tocar la disposición de escritorio. */
+  body.platform-android:not(.platform-tv) .browse-view{display:flex;flex-direction:column}
+  body.platform-android:not(.platform-tv) .browse-view > *{order:5}
+  body.platform-android:not(.platform-tv) .browse-view > .browse-phone-head{order:0;display:flex;align-items:center;justify-content:space-between;margin:16px 0 14px}
+  body.platform-android:not(.platform-tv) .browse-phone-head h1{margin:0;font-size:22px;line-height:28px;font-weight:800}
+  body.platform-android:not(.platform-tv) .browse-phone-head .browse-phone-filters{min-height:44px;margin:0 0 0 12px;padding:8px 14px;border:1px solid var(--outline);border-radius:10px;background:transparent;color:var(--text);font-size:14px;font-weight:500}
+  body.platform-android:not(.platform-tv) .browse-phone-filters .icon{width:18px;height:18px;margin-right:8px}
+  body.platform-android:not(.platform-tv) .browse-view > .category-links{order:1;margin:0 -16px 14px;padding:0 16px}
+  body.platform-android:not(.platform-tv) .browse-view > .category-links button{min-height:40px;margin:0 8px 0 0;padding:8px 14px;border:1px solid transparent;border-radius:10px;background:var(--panel);color:var(--text);font-size:14px;font-weight:500}
+  body.platform-android:not(.platform-tv) .browse-view > .category-links button[aria-pressed="true"]{background:var(--accent);font-weight:700}
+  body.platform-android:not(.platform-tv) .browse-view > .collection-tabs{order:2;display:none}
+  body.platform-android:not(.platform-tv) .browse-view.filters-open > .collection-tabs{display:flex;flex-wrap:nowrap;overflow-x:auto;margin:0 -16px 10px;padding:0 16px}
+  body.platform-android:not(.platform-tv) .browse-view.filters-open > .collection-tabs button{flex:none;min-width:0;min-height:40px;margin:0 8px 0 0;padding:8px 14px;border:1px solid var(--outline) !important;border-radius:10px !important;background:transparent !important;color:var(--text-secondary);font-size:13px}
+  body.platform-android:not(.platform-tv) .browse-view.filters-open > .collection-tabs button[aria-pressed="true"]{border-color:var(--text) !important;color:var(--text);font-weight:700}
+  body.platform-android:not(.platform-tv) .browse-view > .browse-filter-toggle{display:none !important}
+  body.platform-android:not(.platform-tv) .browse-view > .browse-filters{order:3}
+  body.platform-android:not(.platform-tv) .browse-view > .browse-summary{order:4;display:flex;align-items:center;justify-content:space-between;min-height:44px;margin:0 0 4px;color:var(--text-secondary);font-size:13px;line-height:18px}
+  body.platform-android:not(.platform-tv) .browse-summary .browse-summary-clear{min-height:44px;margin:0 0 0 12px;padding:0;border:0;background:none;color:var(--accent-text);font-size:13px;font-weight:600}
+  body.platform-android:not(.platform-tv) .browse-summary .browse-summary-clear[hidden]{display:none}
+  body.platform-android:not(.platform-tv) .browse-view > #browseEmpty,
+  body.platform-android:not(.platform-tv) .browse-view > .grid{order:6}
+  body.platform-android:not(.platform-tv) .browse-view > .browse-more{order:7}
+  body.platform-android:not(.platform-tv) #content .grid{grid-template-columns:repeat(3,minmax(0,1fr));grid-gap:16px 12px}
+  body.platform-android:not(.platform-tv) #content .grid .poster{width:auto;min-width:0;margin:0}
+  body.platform-android:not(.platform-tv) #content .grid .poster .poster-title-plain{min-height:32px;white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+
+  /* Buscar: título, campo con borde blanco al escribir, contador y resultados en lista. */
+  body.platform-android:not(.platform-tv) .search-view{padding-top:16px}
+  body.platform-android:not(.platform-tv) .search-view .search-phone-title{display:block;margin:0 0 14px;font-size:22px;line-height:28px;font-weight:800;color:var(--text)}
+  body.platform-android:not(.platform-tv) .search-view .search-bar{display:flex;align-items:center;min-height:52px;margin:0;padding:0 8px 0 14px;border:2px solid transparent;border-radius:10px;background:var(--panel);box-shadow:none}
+  body.platform-android:not(.platform-tv) .search-view .search-bar:focus-within{border-color:var(--text)}
+  body.platform-android:not(.platform-tv) .search-view .search-bar > .icon{width:20px;height:20px;margin-right:10px;color:var(--text-secondary);stroke-width:2}
+  body.platform-android:not(.platform-tv) .search-view #searchInput{flex:1 1 auto;min-width:0;height:48px;min-height:0;padding:0;border:0;border-radius:0;background:transparent;color:var(--text);font-size:17px;line-height:22px;outline:none;box-shadow:none}
+  body.platform-android:not(.platform-tv) .search-view .search-clear{width:44px;height:44px;min-height:44px;padding:0;border:0;border-radius:22px;background:transparent;color:var(--text-secondary);font-size:24px;line-height:1}
+  body.platform-android:not(.platform-tv) .search-view #searchMode{display:none}
+  body.platform-android:not(.platform-tv) .search-view .search-results-head{display:none}
+  body.platform-android:not(.platform-tv) .search-view .search-count{display:block;margin:14px 0 0;color:var(--text-secondary);font-size:13px;line-height:18px}
+  body.platform-android:not(.platform-tv) #content #searchGrid{display:block;margin-top:4px}
+  body.platform-android:not(.platform-tv) #content #searchGrid .poster{display:flex;flex-direction:row;align-items:center;width:auto;margin:0;padding:10px 0;border-bottom:1px solid var(--line);border-radius:0;background:transparent;transform:none}
+  body.platform-android:not(.platform-tv) #content #searchGrid .poster::after{content:"";flex:none;width:8px;height:8px;margin:0 6px 0 12px;border-right:2px solid var(--muted);border-bottom:2px solid var(--muted);transform:rotate(-45deg)}
+  body.platform-android:not(.platform-tv) #content #searchGrid .poster .poster-art{flex:0 0 56px;width:56px;height:84px;min-height:0;padding-top:0;border-radius:6px}
+  body.platform-android:not(.platform-tv) .search-view #searchInput::-webkit-search-cancel-button{-webkit-appearance:none;display:none}
+  body.platform-android:not(.platform-tv) #content #searchGrid .poster .poster-cat-badge,
+  body.platform-android:not(.platform-tv) #content #searchGrid .poster .poster-score,
+  body.platform-android:not(.platform-tv) #content #searchGrid .poster .poster-flags,
+  body.platform-android:not(.platform-tv) #content #searchGrid .poster .progress-bar{display:none}
+  body.platform-android:not(.platform-tv) #content #searchGrid .poster .poster-info{display:flex;flex-direction:column;flex:1 1 auto;min-width:0;margin:0 0 0 14px}
+  body.platform-android:not(.platform-tv) #content #searchGrid .poster .poster-title-plain{order:1;min-height:0;margin:0;padding:0;font-size:15px;line-height:19px;white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+  body.platform-android:not(.platform-tv) #content #searchGrid .poster .poster-meta{order:2;margin:4px 0 0;padding:0;font-size:12px;line-height:16px}
+  body.platform-android:not(.platform-tv) #content #searchGrid .poster .poster-rating-line{order:3;display:block;margin-top:4px;font-size:12px;line-height:16px;font-weight:700;color:var(--text)}
+  body.platform-android:not(.platform-tv) #content #searchGrid .poster .poster-rating-line .star{color:var(--gold);font-weight:400}
+
+  /* Biblioteca: título, chips (Descargas incluida) y listas. */
+  body.platform-android:not(.platform-tv)[data-view="mylist"] #content > .view{padding-top:16px}
+  body.platform-android:not(.platform-tv)[data-view="mylist"] .library-phone-title{display:block;margin:0 0 14px;font-size:22px;line-height:28px;font-weight:800}
+  body.platform-android:not(.platform-tv)[data-view="mylist"] #content .tabs{display:flex;flex-wrap:nowrap;overflow-x:auto;margin:0 -16px 14px;padding:0 16px;border:0;background:none;box-shadow:none}
+  body.platform-android:not(.platform-tv)[data-view="mylist"] #content .tabs button{display:block;flex:none;min-width:0;min-height:40px;margin:0 8px 0 0;padding:8px 14px;border:1px solid transparent !important;border-radius:10px !important;background:var(--panel) !important;color:var(--text);font-size:14px;line-height:18px;font-weight:500;box-shadow:none}
+  body.platform-android:not(.platform-tv)[data-view="mylist"] #content .tabs button::after{display:none}
+  body.platform-android:not(.platform-tv)[data-view="mylist"] #content .tabs button.active{background:var(--accent) !important;color:var(--text) !important;font-weight:700}
+  body.platform-android:not(.platform-tv) #content:focus{outline:none}
+  body.platform-android:not(.platform-tv)[data-view="mylist"] .library-filters{display:none}
+  body.platform-android:not(.platform-tv)[data-view="mylist"] #content .row-head{display:flex;align-items:center;justify-content:space-between;margin:0 0 10px}
+  body.platform-android:not(.platform-tv)[data-view="mylist"] #content .row-head h2{font-size:13px;line-height:18px;font-weight:500;color:var(--text-secondary)}
+  body.platform-android:not(.platform-tv)[data-view="mylist"] #content .row-head .btn{min-height:40px;padding:6px 12px;border:1px solid var(--outline);border-radius:10px;background:transparent;font-size:13px}
+
+  /* Ajustes: título, fila de perfil y cada opción como fila suelta (título, detalle y valor o interruptor). */
+  body.platform-android:not(.platform-tv)[data-view="settings"] #content > .view{padding-top:16px}
+  body.platform-android:not(.platform-tv) .settings-phone-title{display:block;margin:0 0 14px;font-size:22px;line-height:28px;font-weight:800}
+  body.platform-android:not(.platform-tv) .settings-profile-row{display:flex;align-items:center;width:100%;min-height:72px;margin:0 0 4px;padding:12px 14px;border:0;border-radius:12px;background:var(--panel);color:var(--text);text-align:left}
+  body.platform-android:not(.platform-tv) .settings-profile-avatar{display:flex;align-items:center;justify-content:center;flex:none;width:48px;height:48px;margin-right:14px;border-radius:24px;background:var(--raised);font-size:18px;font-weight:800}
+  body.platform-android:not(.platform-tv) .settings-profile-text{display:flex;flex-direction:column;flex:1 1 auto;min-width:0}
+  body.platform-android:not(.platform-tv) .settings-profile-text strong{font-size:16px;line-height:20px;font-weight:700}
+  body.platform-android:not(.platform-tv) .settings-profile-text span{margin-top:2px;color:var(--text-secondary);font-size:13px;line-height:18px}
+  body.platform-android:not(.platform-tv) .settings-profile-row .icon{flex:none;width:20px;height:20px;color:var(--muted);stroke-width:2}
+  body.platform-android:not(.platform-tv) #content .settings-grid{display:flex;flex-direction:column}
+  body.platform-android:not(.platform-tv) #content .settings-grid > .set-card-updates{order:99}
+  body.platform-android:not(.platform-tv) #content .set-card{margin:0;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none}
+  body.platform-android:not(.platform-tv) #content .set-card.set-card-profiles{display:none}
+  body.platform-android:not(.platform-tv) #content .set-card > h2{margin:22px 0 10px;padding:0;border:0;color:var(--text-secondary);font-size:14px;line-height:18px;font-weight:700}
+  body.platform-android:not(.platform-tv) #content .set-card > .hint,
+  body.platform-android:not(.platform-tv) #content .set-card > p{margin:0 0 10px;color:var(--text-secondary);font-size:13px;line-height:18px}
+  body.platform-android:not(.platform-tv) #content .set-row{display:flex;flex-direction:row;flex-wrap:nowrap;align-items:center;justify-content:space-between;min-height:72px;margin:0 0 10px;padding:12px 14px;border:0;border-radius:12px;background:var(--panel)}
+  body.platform-android:not(.platform-tv) #content .set-row > label:first-child{flex:1 1 auto;min-width:0;margin-right:16px;color:var(--text);font-size:15px;line-height:20px;font-weight:600}
+  body.platform-android:not(.platform-tv) #content .set-row .hint{display:block;margin-top:4px;color:var(--text-secondary);font-size:13px;line-height:18px;font-weight:400}
+  body.platform-android:not(.platform-tv) #content .set-row.set-row-stack{display:block}
+  body.platform-android:not(.platform-tv) #content .set-row.set-row-stack .set-input,
+  body.platform-android:not(.platform-tv) #content .set-row.set-row-stack input[type="text"]{width:100% !important;max-width:100% !important}
+  body.platform-android:not(.platform-tv) #content .set-card-updates > p{margin:0 0 6px}
+  body.platform-android:not(.platform-tv) #content .set-card-updates .m-actions{display:flex;flex-wrap:wrap;margin-top:8px}
+  body.platform-android:not(.platform-tv) #content .set-card-updates .m-actions .btn{min-height:44px;margin:0 8px 8px 0;padding:8px 14px;border:1px solid var(--outline);border-radius:10px;background:transparent;font-size:14px}
+  body.platform-android:not(.platform-tv) #content .set-card-updates .m-actions .btn.primary{border-color:transparent;background:var(--accent);font-weight:700}
+  body.platform-android:not(.platform-tv) #content .set-row.set-row-stack > label:first-child{display:block;margin:0 0 10px}
+  body.platform-android:not(.platform-tv) #content .set-row select,
+  body.platform-android:not(.platform-tv) #content .set-row .set-input{flex:none;width:auto !important;max-width:46% !important;min-height:36px;padding:6px 12px;border:1px solid #343846;border-radius:6px;background:#232631;color:var(--text);font-size:13px;line-height:16px}
+  body.platform-android:not(.platform-tv) #content .set-row .btn{flex:none;min-height:40px;padding:8px 14px;border:1px solid var(--outline);border-radius:10px;background:transparent;font-size:14px;font-weight:500}
+  body.platform-android:not(.platform-tv) #content .set-row .btn.primary{border-color:transparent;background:var(--accent);font-weight:700}
+  body.platform-android:not(.platform-tv) #content .switch{width:44px;min-width:44px;min-height:44px}
+  body.platform-android:not(.platform-tv) #content .switch span{top:12px;bottom:12px;left:4px;right:4px;background:#454750}
+  body.platform-android:not(.platform-tv) #content .switch span::after{top:3px;left:3px;width:14px;height:14px;background:var(--text)}
+  body.platform-android:not(.platform-tv) #content .switch input:checked + span{background:var(--accent)}
+  body.platform-android:not(.platform-tv) #content .switch input:checked + span::after{left:19px;background:var(--text)}
+
+  /* Fichas (película y serie): fondo a sangre de 250 px, botón Volver redondo encima, título, metadatos en línea y acciones. */
+  body.platform-android:not(.platform-tv)[data-view="catalog"] #titlebar,
+  body.platform-android:not(.platform-tv)[data-view="movie"] #titlebar,
+  body.platform-android:not(.platform-tv)[data-view="tv"] #titlebar,
+  body.platform-android:not(.platform-tv)[data-view="nebula"] #titlebar,
+  body.platform-android:not(.platform-tv)[data-view="source"] #titlebar{right:auto;min-height:0;padding:calc(14px + env(safe-area-inset-top,0px)) 0 0 16px;background:transparent}
+  body.platform-android:not(.platform-tv)[data-view="catalog"] #titlebar > :not(#tbBack),
+  body.platform-android:not(.platform-tv)[data-view="movie"] #titlebar > :not(#tbBack),
+  body.platform-android:not(.platform-tv)[data-view="tv"] #titlebar > :not(#tbBack),
+  body.platform-android:not(.platform-tv)[data-view="nebula"] #titlebar > :not(#tbBack),
+  body.platform-android:not(.platform-tv)[data-view="source"] #titlebar > :not(#tbBack){display:none !important}
+  body.platform-android:not(.platform-tv) #titlebar.has-mobile-back #tbBack{width:44px;height:44px;min-width:44px;min-height:44px;padding:10px;border-radius:22px;background:var(--badge-fill)}
+  body.platform-android:not(.platform-tv)[data-view="catalog"] #shell,
+  body.platform-android:not(.platform-tv)[data-view="movie"] #shell,
+  body.platform-android:not(.platform-tv)[data-view="tv"] #shell,
+  body.platform-android:not(.platform-tv)[data-view="nebula"] #shell,
+  body.platform-android:not(.platform-tv)[data-view="source"] #shell{padding-top:0}
+  body.platform-android:not(.platform-tv) #content > .detail-view{padding-top:0}
+  body.platform-android:not(.platform-tv) .detail-view .detail-tabs{min-height:0;margin:0;padding:0;border:0}
+  body.platform-android:not(.platform-tv) .detail-view .detail-tabs{display:none}
+  /* Serie: chips de temporada y episodios en filas (miniatura 128 × 72, título y T · E). */
+  body.platform-android:not(.platform-tv) .detail-view #seasonsHead{margin:22px 0 10px}
+  body.platform-android:not(.platform-tv) .detail-view .seasons-tabs{display:flex;flex-wrap:nowrap;overflow-x:auto;margin:0 -16px 12px;padding:0 16px;border:0}
+  body.platform-android:not(.platform-tv) .detail-view .seasons-tabs .season-tab{flex:none;min-width:0;min-height:40px;margin:0 8px 0 0;padding:8px 14px;border:1px solid transparent !important;border-radius:10px !important;background:var(--panel) !important;color:var(--text);font-size:14px;font-weight:500}
+  body.platform-android:not(.platform-tv) .detail-view .seasons-tabs .season-tab.active{background:var(--accent) !important;color:var(--text) !important;font-weight:700}
+  body.platform-android:not(.platform-tv) .detail-view .episodes{display:block}
+  body.platform-android:not(.platform-tv) .detail-view .episode{display:flex;flex-wrap:wrap;align-items:center;margin:0 0 14px;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none}
+  body.platform-android:not(.platform-tv) .detail-view .episode .ep-still{position:relative;flex:0 0 128px;width:128px;height:72px;margin:0 12px 0 0;border-radius:10px;overflow:hidden;background:var(--card-art)}
+  body.platform-android:not(.platform-tv) .detail-view .episode .ep-meta{display:flex;flex-direction:column;flex:1 1 0;min-width:0}
+  body.platform-android:not(.platform-tv) .detail-view .episode .ep-name{order:1;font-size:14px;line-height:18px;font-weight:600;color:var(--text)}
+  body.platform-android:not(.platform-tv) .detail-view .episode .ep-num{order:2;margin-top:3px;color:var(--muted);font-size:12px;line-height:16px;font-weight:400}
+  body.platform-android:not(.platform-tv) .detail-view .episode .ep-over{display:none}
+  body.platform-android:not(.platform-tv) .detail-view .episode .ep-actions{display:flex;flex-wrap:wrap;flex:1 0 100%;margin:8px 0 0}
+  body.platform-android:not(.platform-tv) .detail-view .episode .ep-actions .ep-play-full{display:none}
+  body.platform-android:not(.platform-tv) .detail-view .episode .ep-actions button{flex:none;width:auto;min-width:0;min-height:36px;margin:0 8px 0 0;padding:6px 12px;border:1px solid var(--outline);border-radius:10px;background:transparent;color:var(--text-secondary);font-size:12px;font-weight:500}
+  body.platform-android:not(.platform-tv) .detail-view .detail-hero{margin:0 -16px 8px;padding:0;border:0;border-radius:0;background:var(--bg);overflow:hidden}
+  body.platform-android:not(.platform-tv) .detail-view .detail-hero .backdrop{top:0;left:0;right:0;bottom:auto;height:calc(250px + env(safe-area-inset-top,0px));filter:none;opacity:1;background-size:cover;background-position:center 25%}
+  body.platform-android:not(.platform-tv) .detail-view .detail-hero::before{content:"";position:absolute;top:calc(110px + env(safe-area-inset-top,0px));left:0;right:0;height:141px;z-index:1;background:linear-gradient(0deg,var(--bg) 6%,rgba(7,8,12,.15) 100%);pointer-events:none}
+  body.platform-android:not(.platform-tv) .detail-view .detail-hero .content{position:relative;z-index:2;display:block;padding:calc(200px + env(safe-area-inset-top,0px)) 16px 0}
+  body.platform-android:not(.platform-tv) .detail-view .detail-poster{display:none}
+  body.platform-android:not(.platform-tv) .detail-view .d-info{width:auto;max-width:none;margin:0;padding:0}
+  body.platform-android:not(.platform-tv) .detail-view .d-title{margin:0 0 10px;font-size:28px;line-height:32px;font-weight:800;letter-spacing:0}
+  body.platform-android:not(.platform-tv) .detail-view .d-title .d-year{display:none}
+  body.platform-android:not(.platform-tv) .detail-view .d-meta{display:flex;flex-wrap:wrap;align-items:center;margin:0 0 6px;font-size:13px;line-height:20px;color:var(--text-meta)}
+  body.platform-android:not(.platform-tv) .detail-view .d-meta .chip{min-height:0;margin:0 10px 4px 0;padding:0;border:0;border-radius:0;background:none;color:var(--text-meta);font-size:13px;line-height:20px;font-weight:400}
+  body.platform-android:not(.platform-tv) .detail-view .d-meta .chip.chip-accent{padding:3px 8px;border-radius:5px;background:var(--chip-fill);color:var(--text);font-size:12px;line-height:16px;font-weight:700}
+  body.platform-android:not(.platform-tv) .detail-view .d-meta .chip.d-id{display:none}
+  body.platform-android:not(.platform-tv) .detail-view .d-meta .rating-slot .chip{color:var(--text);font-weight:700}
+  body.platform-android:not(.platform-tv) .detail-view .d-genres{display:block;margin:0 0 10px;color:var(--text-secondary);font-size:13px;line-height:18px}
+  body.platform-android:not(.platform-tv) .detail-view .d-genres span{display:inline;margin:0;padding:0;border:0;border-radius:0;background:none;color:inherit;font-size:inherit}
+  body.platform-android:not(.platform-tv) .detail-view .d-genres span + span::before{content:" · "}
+  body.platform-android:not(.platform-tv) .detail-view .d-alt-names{color:var(--muted);font-size:12px}
+  body.platform-android:not(.platform-tv) .detail-view .d-overview,
+  body.platform-android:not(.platform-tv) .detail-view .d-info > p{margin:0 0 10px;color:var(--text-meta);font-size:14px;line-height:20px}
+  body.platform-android:not(.platform-tv) .detail-view .d-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));grid-gap:8px;margin:14px 0 0}
+  body.platform-android:not(.platform-tv) .detail-view .d-actions .btn{display:flex;flex-direction:column;align-items:center;justify-content:center;width:100%;min-height:52px;margin:0;padding:8px;border:1px solid transparent;border-radius:10px;background:var(--panel);color:var(--text);font-size:12px;line-height:15px;font-weight:500;white-space:normal;text-align:center}
+  body.platform-android:not(.platform-tv) .detail-view .d-actions .btn .icon{width:18px;height:18px;margin:0 0 4px}
+  body.platform-android:not(.platform-tv) .detail-view .d-actions .btn.primary{grid-column:1 / -1;flex-direction:row;min-height:48px;background:var(--accent);font-size:15px;font-weight:700}
+  body.platform-android:not(.platform-tv) .detail-view .d-actions .btn.primary .icon{margin:0 8px 0 0}
+  body.platform-android:not(.platform-tv) .detail-view #btnShare{display:none}
+  /* Fuentes: lista compacta (nombre y tamaño), la elegida con borde blanco. */
+  body.platform-android:not(.platform-tv) .detail-view .d-info .row-head{margin:22px 0 10px}
+  body.platform-android:not(.platform-tv) .detail-view .qualities{display:block}
+  body.platform-android:not(.platform-tv) .detail-view .quality-item{display:flex;flex-direction:row;align-items:center;justify-content:space-between;min-height:48px;margin:0 0 8px;padding:10px 14px;border:1px solid transparent;border-radius:12px;background:var(--panel);text-align:left}
+  body.platform-android:not(.platform-tv) .detail-view .quality-item.sel{border-color:var(--text);background:var(--raised)}
+  body.platform-android:not(.platform-tv) .detail-view .quality-item .q-name{font-size:14px;line-height:18px;font-weight:700}
+  body.platform-android:not(.platform-tv) .detail-view .quality-item .q-size{margin:0 0 0 12px;color:var(--text-secondary);font-size:12px;line-height:16px;text-align:right}
+
+  /* Preparando reproducción: arte del título al 55 %, texto abajo (título, T · E, estado con el indicador) y Cancelar al pie. */
+  body.platform-android:not(.platform-tv) #launchLayer{background:var(--bg)}
+  body.platform-android:not(.platform-tv) #launchLayer .launch-art{top:0;left:0;right:0;bottom:auto;height:520px;background-size:cover;background-position:center;opacity:.55;filter:none;transform:none}
+  body.platform-android:not(.platform-tv) #launchLayer::before{content:"";position:absolute;top:200px;left:0;right:0;height:321px;z-index:1;background:linear-gradient(0deg,var(--bg) 4%,rgba(7,8,12,.7) 55%,rgba(7,8,12,.15) 100%);pointer-events:none}
+  body.platform-android:not(.platform-tv) #launchLayer .launch-card{position:absolute;top:auto;left:24px;right:24px;bottom:calc(40px + env(safe-area-inset-bottom,0px));z-index:2;display:grid;grid-template-columns:auto minmax(0,1fr);grid-column-gap:12px;align-items:center;width:auto;max-width:none;margin:0;padding:0;border:0;border-radius:0;background:none;box-shadow:none;text-align:left;transform:none}
+  body.platform-android:not(.platform-tv) #launchLayer .launch-card > *{margin:0}
+  body.platform-android:not(.platform-tv) #launchLayer .launch-title{grid-column:1 / -1;grid-row:1;margin:0 0 6px;font-size:28px;line-height:33px;font-weight:700;color:var(--text);text-align:left}
+  body.platform-android:not(.platform-tv) #launchLayer .launch-meta{grid-column:1 / -1;grid-row:2;color:var(--text-secondary);font-size:15px;line-height:21px;text-align:left}
+  body.platform-android:not(.platform-tv) #launchLayer .loading-ring{grid-column:1;grid-row:3;width:28px;height:28px;margin-top:18px}
+  body.platform-android:not(.platform-tv) #launchLayer .launch-text{grid-column:2;grid-row:3;margin-top:18px;color:var(--text-meta);font-size:15px;line-height:20px;text-align:left}
+  body.platform-android:not(.platform-tv) #launchLayer .launch-cancel{grid-column:1 / -1;grid-row:4;display:flex;align-items:center;justify-content:center;width:100%;min-height:48px;margin-top:32px;border:1px solid var(--outline);border-radius:10px;background:transparent;color:var(--text);font-size:15px;font-weight:500;text-align:center}
+  body.platform-android:not(.platform-tv) #launchLayer .launch-cancel:focus{outline:none;border-color:var(--text)}
+
+  /* Barra inferior: Inicio, Explorar, Buscar, Biblioteca y Ajustes, con la marca roja bajo la sección activa. */
+  body.platform-android:not(.platform-tv) .phone-bottom-nav{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));padding:8px max(4px,env(safe-area-inset-right,0px)) calc(10px + env(safe-area-inset-bottom,0px)) max(4px,env(safe-area-inset-left,0px));background:var(--bg2);border-top:1px solid var(--line)}
+  body.platform-android:not(.platform-tv) .phone-bottom-nav button{display:flex;flex-direction:column;align-items:center;justify-content:center;min-width:0;min-height:48px;padding:0;border:0;border-radius:0;background:transparent;color:var(--text-secondary);font-size:11px;line-height:13px;font-weight:500}
+  body.platform-android:not(.platform-tv) .phone-bottom-nav button .icon{width:22px;height:22px;margin-bottom:4px;stroke-width:2;color:inherit}
+  body.platform-android:not(.platform-tv) .phone-bottom-nav .nav-bar{display:block;width:20px;height:3px;margin-top:4px;border-radius:2px;background:transparent}
+  body.platform-android:not(.platform-tv) .phone-bottom-nav button.active{background:transparent;color:var(--text);font-weight:700}
+  body.platform-android:not(.platform-tv) .phone-bottom-nav button.active .icon{color:var(--text)}
+  body.platform-android:not(.platform-tv) .phone-bottom-nav button.active .nav-bar{background:var(--accent)}
+}
