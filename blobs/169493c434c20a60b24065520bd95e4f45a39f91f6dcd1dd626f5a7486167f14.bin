@@ -1,0 +1,1407 @@
+'use strict';
+/**
+ * Capa de datos del clon:
+ *  1) TMDB (idéntico al original: los modelos Movie/Series usan id de TMDB,
+ *     generos como ids de TMDB y posters de image.tmdb.org/t/p/w500).
+ *  2) Catálogos externos en formato MoviePlus:
+ *     { movies: [{id,nameFile,generos,othersNames,resolutions,type,urlImage,urls,vote,date}], series: [...] }
+ *     type: 1 = película, 2 = serie. Series admiten "episodes":
+ *     [{season, episode, name, overview, stillPath, urls:[]}] (EpisodeExtra/Quality del original).
+ *
+ * Optimizaciones: caché con TTL, deduplicación de peticiones en vuelo y límites de página.
+ */
+const API = (() => {
+  const providerCall=(...args)=>typeof SourceConnection!=='undefined'?SourceConnection.call(...args):Platform.nebulaCall(...args);
+  const BASE = 'https://api.themoviedb.org/3';
+  const IMG = 'https://image.tmdb.org/t/p';
+  const searchSnapshot=typeof MoviePlusSearchIndex==='object'?MoviePlusSearchIndex:{items:[],primaryAliases:{}};
+  const backupById=new Map((searchSnapshot.items||[]).map(item=>[String(item.id),item]));
+  const nebulaItems = new Map();
+  const nebulaByCatalog = new Map();
+  const filtroNebula = { lista: [], pasan: [], cursor: 0, corriendo: false };
+  function resetFiltroNebula(lista) {
+    const firma = lista.map((item) => String(item.id)).join('|');
+    if (filtroNebula.firma === firma) return;
+    filtroNebula.firma = firma;
+    filtroNebula.lista = lista;
+    filtroNebula.pasan = [];
+    filtroNebula.cursor = 0;
+    filtroNebula.corriendo = false;
+  }
+  async function cargarLoteNebula(tamano) {
+    if (filtroNebula.corriendo || filtroNebula.cursor >= filtroNebula.lista.length) return;
+    filtroNebula.corriendo = true;
+    const laxo = (t) => String(t || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
+    const anio = (v) => Number(String(v || '').slice(0, 4));
+    const lote = filtroNebula.lista.slice(filtroNebula.cursor, filtroNebula.cursor + tamano);
+    try {
+      const revisados = await Promise.all(lote.map(async (item) => {
+        try {
+          const local = await cached('nebula-check:' + item.title, TTL.list, () => providerCatalog.search(item.title, ['movieplus']));
+          const candidatos = (local && local[0] && local[0].items) || [];
+          const existe = candidatos.some((c) => {
+            if (laxo(c.title) !== laxo(item.title)) return false;
+            const a = anio(c.year), b = anio(item.year);
+            return !a || !b || Math.abs(a - b) <= 1;
+          });
+          return existe ? null : item;
+        } catch { return item; }
+      }));
+      filtroNebula.pasan.push(...revisados.filter(Boolean));
+      filtroNebula.cursor += lote.length;
+    } catch {}
+    filtroNebula.corriendo = false;
+    if (filtroNebula.cursor < filtroNebula.lista.length) setTimeout(() => { cargarLoteNebula(16); }, 80);
+  }
+  async function nebulaRowsProgresivo() {
+    if (!Platform.nebulaCall) return [];
+    let data = null;
+    try {
+      data = await cached('nebula:home', TTL.list, async () => {
+        const categories = await providerCall('categories', { kind: 'vod' });
+        const films = categories.filter((category) => /film|pel[ií]cula/i.test(category.group_title || ''));
+        const category = films.find((c) => c.title === String(new Date().getFullYear())) || films.find((c) => /^all$/i.test(c.title)) || films[0];
+        if (!category) throw Error('Nebula sin categoria de peliculas');
+        return providerCall('catalog', { kind: 'vod', category: category.id, page: 1 });
+      });
+    } catch {
+      return [];
+    }
+    const lista = ((data && data.items) || []).map(nebulaItem).filter((item) => item.type !== 'tv');
+    resetFiltroNebula(lista);
+    if (!filtroNebula.pasan.length) await cargarLoteNebula(16);
+    else cargarLoteNebula(16);
+    return [{ title: 'Nébula · Más películas', items: filtroNebula.pasan.slice() }];
+  }
+  const jellyfinReferences=new Map();
+  const combinedEpisodes=new Map();
+  let backupByCanonicalCache=null,backupByCanonicalSize=-1;
+  function canonicalBackup(canonicalId){
+    const items=searchSnapshot.items||[];
+    if(!backupByCanonicalCache||backupByCanonicalSize!==items.length){
+      backupByCanonicalCache=new Map(items.filter(item=>item.canonicalId).map(item=>[String(item.canonicalId),item]));
+      backupByCanonicalSize=items.length;
+    }
+    return backupByCanonicalCache.get(String(canonicalId));
+  }
+  function matchingCatalogs(item){
+    const candidates=[...catalogsCache.values()].flatMap(catalog=>item.type==='tv'?catalog.series:catalog.movies);
+    let matches=candidates.filter(candidate=>CatalogSources.identity.compare(item,candidate)==='id');
+    if(!matches.length){const match=CatalogSources.identity.selectMatch(item,candidates);if(match)matches=[match];}
+    if(item.kind==='catalog'&&!matches.includes(item))matches.push(item);
+    return matches;
+  }
+  function hasPrimaryMovieSources(item){
+    return matchingCatalogs(item).some(catalog=>(catalog.qualities||[]).length>0||(catalog.catalogUrl==='movieplus:catalog'&&(!Array.isArray(catalog.raw?.urls)||!catalog.raw.urls.length)&&String(catalog.resolutions||'').trim().length>0));
+  }
+  const providerCatalog=CatalogSources.catalogService.create({identity:CatalogSources.identity,availability:CatalogSources.availability,topQualities:CatalogSources.topQualities,providers:[
+    {id:'archive',capabilities:{movies:true},supports:item=>item.kind==='archive',search:archiveSearch,listSources:async item=>({state:'available',sources:(await archiveDetail(item.id)).sources||[]})},
+    {id:'jellyfin',capabilities:{movies:true,series:true},supports:item=>item.kind==='jellyfin',search:jellyfinSearch,listSources:async item=>({state:'available',sources:[{name:'HLS · Jellyfin',url:jellyfinPrivateStreamUrl(item.id)}].filter(source=>source.url)})},
+    {id:'nebula',capabilities:{movies:true,series:true},supports:item=>!hasPrimaryMovieSources(item)&&item.type!=='tv'&&item.kind!=='archive'&&item.kind!=='jellyfin'&&!CatalogSources.isTestCatalog(item.catalogUrl),search:nebulaSearch,listSources:movieSources},
+    {id:'movieplus',capabilities:{movies:true,series:true,episodes:true},search:async query=>(await loadCatalogs(Store.settings.catalogUrls||[])).items.filter(item=>relevance(item,query)<4),supports:item=>item.kind!=='archive'&&item.kind!=='jellyfin',listSources:async item=>{
+      const matches=matchingCatalogs(item);
+      if(item.type==='tv'){
+        if(!item.episode)return {state:'unknown',sources:[]};
+        const combined=combinedEpisodes.get(String(item.id));
+        const episodes=combined && Date.now()-combined.at<5*60*1000?combined.episodes:matches.flatMap(catalog=>catalog.raw?.episodes||[]);
+        const ep=episodes.find(ep=>Number(ep.season)===Number(item.season)&&Number(ep.episode)===Number(item.episode));
+        const sources=ep?CatalogSources.parse(ep.urls,ep.resolutions).filter(source=>source.url):[];
+        return {state:sources.length?'available':ep?'unavailable':'unknown',sources};
+      }
+      const sources=[];
+      for(const catalog of matches){
+        if((catalog.qualities||[]).length>0){sources.push(...catalog.qualities);continue;}
+        if(catalog.catalogUrl==='movieplus:catalog'&&(!Array.isArray(catalog.raw?.urls)||!catalog.raw.urls.length)&&String(catalog.resolutions||'').trim().length>0){
+          const loaded=await catalogEpisodes('movie:'+catalog.id);
+          const rawUrls=loaded?.[0]?.urls||[];
+          const parsed=CatalogSources.parse(rawUrls,catalog.resolutions).filter(source=>source.url);
+          catalog.qualities=parsed;
+          catalog.urls=parsed.map(source=>source.url);
+          catalog.raw={...catalog.raw,urls:rawUrls};
+          sources.push(...parsed);
+        }
+      }
+      return {state:sources.length?'available':'unknown',sources};
+    }}
+  ]});
+  async function sourcesFor(item){
+    let result=await providerCatalog.listSources(item);
+    let providers=[...(result.providers||[])];
+    const nebulaVinculado = item && (item.nebulaId || nebulaByCatalog.get(String(item.id)));
+    // movieSources ya consultó playback.options de este mismo título: no se repite la llamada al proveedor.
+    const nebulaPrefix = nebulaVinculado ? 'nebula://source/' + encodeURIComponent(String(nebulaVinculado).replace(/^nebula:/, '')) : '';
+    const nebulaYaConsultado = Boolean(nebulaPrefix) && (result.allSources || []).some((source) => String(source?.url || '').split('?')[0] === nebulaPrefix);
+    if (nebulaVinculado && !nebulaYaConsultado && (!result.allSources?.length || !hasPrimaryMovieSources(item)) && Platform.nebulaCall && !String(item.id).startsWith('nebula:')) {
+      try {
+        const idNebula = String(nebulaVinculado).replace(/^nebula:/, '');
+        const opciones = await providerCall('playback.options', { kind: 'vod', id: idNebula });
+        const extra = (opciones.qualities || []).flatMap((calidad) => (calidad.audio_languages?.length ? calidad.audio_languages : [{ label: 'Original', value: '' }]).map((audio) => ({
+          name: calidad.label + ' \u00b7 ' + audio.label,
+          size: 'Fuente adicional',
+          providerId: 'nebula',
+          url: 'nebula://source/' + encodeURIComponent(idNebula) + '?' + new URLSearchParams({ quality: calidad.value, ...(audio.value ? { audio_language: audio.value } : {}) }),
+        })));
+        if (extra.length) {
+          const seen = new Set((result.allSources || []).map((s) => s.url));
+          result.allSources = [...(result.allSources || []), ...extra.filter((s) => s.url && !seen.has(s.url))];
+          result.sources = CatalogSources.topQualities(result.allSources);
+          result.state = 'available';
+        }
+      } catch {}
+    }
+    const alreadyTriedNebula = providers.some((p) => p.providerId === 'nebula' && (p.sources?.length || p.state !== 'unknown'));
+    if (!result.allSources?.length && !alreadyTriedNebula && item && item.type !== 'tv' && item.kind !== 'archive' && item.kind !== 'jellyfin' && !CatalogSources.isTestCatalog(item.catalogUrl) && Platform.nebulaCall) {
+      const backup = await movieSources(item);
+      providers = [...providers.filter((p) => p.providerId !== 'nebula'), backup];
+      const aggregated = CatalogSources.availability.aggregate(providers);
+      const seen = new Set();
+      const deduped = aggregated.sources.filter((s) => { if (!s?.url || seen.has(s.url)) return false; seen.add(s.url); return true; });
+      result = { ...result, ...aggregated, allSources: deduped, sources: CatalogSources.topQualities(deduped), providers };
+    }
+    if(!Platform.registerSources)return {...result,providers:providers.map(provider=>({...provider,sources:[]}))};
+    const allSources=await Platform.registerSources(result.allSources);
+    if(item.kind==='jellyfin'&&allSources[0])jellyfinReferences.set(item.id,allSources[0].url);
+    return {...result,allSources,sources:CatalogSources.topQualities(allSources),providers:providers.map(provider=>({...provider,sources:[]}))};
+  }
+  async function episodesFor(item){
+    if(item.kind==='nebula'&&item.type==='tv'){
+      const raw=item.raw||{},seasonMatch=String(item.title||'').match(/(?:T(?:emp\.)?|Season)\s*(\d+)\s*$/i);
+      const fallbackSeason=seasonMatch?Number(seasonMatch[1]):1;
+      const seasons=raw.seasons?.length?raw.seasons:[{id:raw.id||item.nebulaId,number:fallbackSeason}];
+      const episodes=[];
+      for(const season of seasons){
+        if(!Number.isInteger(Number(season.number))||Number(season.number)<1)continue;
+        const detail=String(season.id)===String(raw.id)?raw:await providerCall('details',{kind:'vod',id:String(season.id)});
+        for(const ep of detail.episodes||[]){
+          if(!ep.id||!Number.isInteger(Number(ep.number))||Number(ep.number)<1)continue;
+          episodes.push({season:Number(season.number),episode:Number(ep.number),name:ep.title||'',urls:[{name:'Automática',url:'nebula://source/'+encodeURIComponent(ep.id)}]});
+        }
+      }
+      const registeredNebula=await registerSourceGroups(episodes.map(episode=>episode.urls));
+      episodes.forEach((episode,index)=>{episode.urls=registeredNebula[index];});
+      return {episodes,warnings:[]};
+    }
+    const providers=matchingCatalogs(item),warnings=[],merged=new Map();
+    for(const provider of providers){
+      let episodes=provider.raw?.episodes||[];
+      if(provider.catalogUrl==='movieplus:catalog'){
+        try{episodes=await catalogEpisodes(provider.id);provider.raw={...provider.raw,episodes};}
+        catch(error){warnings.push(CatalogSources.availability.failure('movieplus',error));}
+      }
+      for(const episode of episodes){
+        const season=Number(episode.season),number=Number(episode.episode);
+        if(!Number.isInteger(season)||season<0||!Number.isInteger(number)||number<1)continue;
+        const key=CatalogSources.identity.episodeKey(item.id,season,number);
+        const previous=merged.get(key),urls=[...(previous?.urls||[]),...CatalogSources.parse(episode.urls,episode.resolutions).filter(source=>source.url)];
+        const unique=[...new Map(urls.map(source=>[source.url,source])).values()];
+        merged.set(key,{...episode,season,episode:number,urls:unique});
+      }
+    }
+    // Add independent episode sources only after title, original year and explicit season agree.
+    if(!merged.size && Platform.nebulaCall && !CatalogSources.isTestCatalog(item.catalogUrl)){
+      try{
+        const extra=await additionalSeriesEpisodes(item);
+        for(const episode of extra){
+          const key=CatalogSources.identity.episodeKey(item.id,episode.season,episode.episode),previous=merged.get(key);
+          merged.set(key,{...episode,...previous,urls:[...(previous?.urls||[]),...episode.urls]});
+        }
+        if(merged.size)warnings.length=0;
+      }catch(error){warnings.push(CatalogSources.availability.failure('nebula',error));}
+    }
+    const episodes=[...merged.values()].sort((a,b)=>a.season-b.season||a.episode-b.episode);
+    const registered=await registerSourceGroups(episodes.map(episode=>episode.urls));
+    episodes.forEach((episode,index)=>{episode.urls=registered[index];});
+    combinedEpisodes.set(String(item.id),{at:Date.now(),episodes});
+    return {episodes,warnings};
+  }
+  /** Registra las fuentes de varios elementos en lotes de hasta 500 (límite del esquema IPC) y las devuelve agrupadas como entraron. */
+  const SOURCE_REGISTER_BATCH=500;
+  async function registerSourceGroups(groups){
+    const lists=groups.map(group=>Array.isArray(group)?group:[]);
+    if(!Platform.registerSources)return lists;
+    const flat=lists.flat();
+    if(!flat.length)return lists;
+    const registered=[];
+    for(let start=0;start<flat.length;start+=SOURCE_REGISTER_BATCH){
+      const part=await Platform.registerSources(flat.slice(start,start+SOURCE_REGISTER_BATCH));
+      if(!Array.isArray(part)||part.length!==Math.min(SOURCE_REGISTER_BATCH,flat.length-start))throw Error('No se pudieron registrar las fuentes de los episodios');
+      registered.push(...part);
+    }
+    let offset=0;
+    return lists.map(list=>{const part=registered.slice(offset,offset+list.length);offset+=list.length;return part;});
+  }
+  async function additionalSeriesEpisodes(item){
+    const year=CatalogSources.identity.year(item);if(!year)return [];
+    const canonical=raw=>({...nebulaItem(raw),title:String(raw.title||'').replace(/\s+(?:T(?:emp\.)?|Season)\s*\d+\s*$/i,'').replace(new RegExp('\\s+'+year+'$'),'')});
+    let match;
+    const extraSeriesNames=String(item.othersNames||'').split(/[|,;/]+/).map(s=>s.trim()).filter(Boolean);
+    const seriesLookup={...item,originalTitle:item.originalTitle||extraSeriesNames[0]||''};
+    for(const query of [...new Set([item.title,item.originalTitle,...extraSeriesNames].filter(Boolean))]){
+      const result=await cached('series-provider:'+query,TTL.search,()=>providerCall('search',{kind:'vod',query,page:1}));
+      const candidates=(result.items||[]).filter(raw=>CatalogSources.identity.nebulaType(raw)==='tv').map(raw=>({...canonical(raw),raw}));
+      // A season-one record identifies the series; never pick an ambiguous edition.
+      match=CatalogSources.identity.selectMatch(seriesLookup,candidates.filter(candidate=>/\s(?:T(?:emp\.)?|Season)\s*1\s*$/i.test(candidate.raw.title||'')))
+        || CatalogSources.identity.selectMatch(seriesLookup,candidates.filter(candidate=>!/\s(?:T(?:emp\.)?|Season)\s*\d+\s*$/i.test(candidate.raw.title||'')));
+      if(match)break;
+    }
+    if(!match)return [];
+    const first=await providerCall('details',{kind:'vod',id:match.nebulaId});
+    if(CatalogSources.identity.compare(seriesLookup,canonical(first))==='different')return [];
+    const seasons=first.seasons?.length?first.seasons:[{id:first.id,number:1}];
+    const output=[];
+    for(const season of seasons){
+      if(!Number.isInteger(season.number)||season.number<1)continue;
+      const detail=season.id===first.id?first:await providerCall('details',{kind:'vod',id:season.id});
+      for(const ep of detail.episodes||[]){
+        if(!ep.id||!Number.isInteger(ep.number)||ep.number<1)continue;
+        output.push({season:season.number,episode:ep.number,name:ep.title,urls:[{name:'Automática · Fuente adicional',url:'nebula://source/'+encodeURIComponent(ep.id)}]});
+      }
+    }
+    return output;
+  }
+  const XUPER_GENRE_CODES = {
+    action: 28, 'acción': 28, accion: 28,
+    adventure: 12, aventura: 12, aventuras: 12,
+    'action adventure': 10759, 'acción y aventura': 10759, 'accion y aventura': 10759,
+    animation: 16, 'animación': 16, animacion: 16, anime: 16, cartoon: 16,
+    comedy: 35, comedia: 35,
+    crime: 80, crimen: 80,
+    documentary: 99, documental: 99,
+    drama: 18, scripted: 18,
+    family: 10751, familia: 10751,
+    fantasy: 14, 'fantasía': 14, fantasia: 14, fantastico: 14,
+    history: 36, historia: 36, biography: 36, 'biografía': 36, biografia: 36,
+    horror: 27, terror: 27,
+    music: 10402, 'música': 10402, musica: 10402, musical: 10402,
+    mystery: 9648, misterio: 9648,
+    romance: 10749, 'romántico': 10749, romantico: 10749,
+    'sci fi': 878, 'science fiction': 878, 'ciencia ficción': 878, 'ciencia ficcion': 878,
+    'sci fi fantasy': 10765, 'ciencia ficción y fantasía': 10765,
+    'tv movie': 10770, 'película tv': 10770,
+    thriller: 53, suspense: 53, suspenso: 53,
+    war: 10752, guerra: 10752, 'bélica': 10752, belica: 10752,
+    western: 37,
+    kids: 10762, children: 10762, infantil: 10762,
+    news: 10763, noticias: 10763,
+    reality: 10764, 'reality tv': 10764, 'game show': 10764,
+    soap: 10766, telenovela: 10766,
+    talk: 10767,
+    'war politics': 10768,
+  };
+  const XUPER_ANIME_CATS = new Set(['77196','77197','77198','77199','77200','77202','77205','77206','77209']);
+  const XUPER_CARTOON_CATS = new Set(['77177','77180','77183','77186','77187','77188','77191','80170','80221']);
+  const XUPER_DORAMA_CATS = new Set(['81611','79540']);
+  const XUPER_NOVELA_CATS = new Set(['77085','77145']);
+  const XUPER_PREMIERE_CATS = ['80142', '77106', '77117', '81215', '81216', '79708'];
+  const XUPER_BROWSE_GROUPS = {
+    movies: { primary: ['77115', '77106', '77117', '80142', '81215', '81216', '79708'], more: '77115' },
+    series: { primary: ['77143', '77153', '80143'], more: '77143' },
+    anime: { primary: ['77200', '77206', '77205', '77209', '77196'], more: '77196' },
+    cartoons: { primary: ['77177', '77187', '77183'], more: '77177' },
+    doramas: { primary: ['81611', '79540'], more: '79540' },
+    telenovelas: { primary: ['77085', '77145'], more: '77145' },
+  };
+  function xuperMetadata(raw, mediaType) {
+    const rawGenres = Array.isArray(raw.genres) ? raw.genres.join(',') : String(raw.genres || '');
+    const lowerGenres = rawGenres.toLowerCase();
+    const sourceCat = String(raw.source_category || '');
+    const genreIds = [...new Set(rawGenres.split(/[,;|]+/).map(part => XUPER_GENRE_CODES[part.trim().toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim()]).filter(Boolean))];
+    let catalogType = mediaType === 'tv' ? 2 : mediaType === 'movie' ? 1 : 0;
+    if (XUPER_ANIME_CATS.has(sourceCat) || /\banime\b/.test(lowerGenres)) catalogType = 3;
+    else if (XUPER_DORAMA_CATS.has(sourceCat)) catalogType = 6;
+    else if (XUPER_NOVELA_CATS.has(sourceCat) || /\b(?:soap|telenovela)\b/.test(lowerGenres)) catalogType = 5;
+    else if (XUPER_CARTOON_CATS.has(sourceCat) || /\bcartoon\b/.test(lowerGenres)) catalogType = 4;
+    return { catalogType, genreIds, sourceCategory: sourceCat };
+  }
+  function nebulaItem(raw) {
+    const stored=backupById.get(String(raw.id))||{};
+    raw={...stored,...raw,aliases:[...new Set([...(stored.aliases||[]),...(raw.aliases||[])])]};
+    const identities=[{providerId:'nebula',id:String(raw.id)}];
+    const canonical=String(raw.canonicalId||'').match(/^tmdb:(movie|series):(\d+)$/);
+    if(canonical)identities.push({providerId:'tmdb',id:canonical[2]});
+    const mediaType=CatalogSources.identity.nebulaType(raw);
+    const meta=xuperMetadata(raw,mediaType);
+    const item = {
+      kind:'nebula',
+      id:'nebula:'+raw.id,
+      nebulaId:raw.id,
+      type:mediaType,
+      ...(meta.catalogType ? { catalogType: meta.catalogType } : {}),
+      ...(meta.genreIds.length ? { genreIds: meta.genreIds } : {}),
+      ...(meta.sourceCategory ? { sourceCategory: meta.sourceCategory } : {}),
+      title:raw.title,
+      originalTitle:raw.originalTitle||'',
+      othersNames:raw.othersNames||'',
+      aliases:raw.aliases,
+      identities,
+      poster:raw.poster,
+      backdrop:raw.backdrop,
+      year:raw.year,
+      rating:raw.score,
+      overview:raw.description || '',
+      raw,
+    };
+    nebulaItems.set(item.id,item);
+    return item;
+  }
+  function nebulaLocalSearch(query) {
+    return (searchSnapshot.items||[]).filter(raw=>relevance({title:raw.title,originalTitle:raw.originalTitle,aliases:raw.aliases},query)<4).map(nebulaItem);
+  }
+  async function nebulaLiveSearch(query) {
+    const data=await cached('nebula:live:'+query,TTL.search,()=>providerCall('search',{kind:'vod',query,page:1}));
+    return (data.items||[]).map(raw=>nebulaItem({...raw,_liveSearch:true}));
+  }
+  async function nebulaSearch(query) {
+    const stored=nebulaLocalSearch(query);
+    if(!Platform.nebulaCall)return stored;
+    let canLive=!stored.length;
+    if(!canLive && typeof SourceConnection!=='undefined'){
+      if(SourceConnection.isReady?.())canLive=true;
+      else{try{const st=await SourceConnection.ensure();canLive=Boolean(st?.configured);}catch{}}
+    }
+    if(!canLive)return stored;
+    try{
+      const live=await nebulaLiveSearch(query);
+      if(!stored.length)return live;
+      const merged=new Map();
+      for(const item of live)merged.set(String(item.id),item);
+      for(const item of stored)if(!merged.has(String(item.id)))merged.set(String(item.id),item);
+      return [...merged.values()];
+    }catch(error){
+      if(stored.length)return stored;
+      throw error;
+    }
+  }
+  async function nebulaDetail(id) {
+    const cleanId = String(id).replace(/^nebula:/, '');
+    const stored = typeof backupById !== 'undefined' ? backupById.get(cleanId) : undefined;
+    const previous = nebulaItems.get(id) || (stored ? nebulaItem(stored) : undefined);
+    try {
+      let raw;
+      const baseTitle = String(previous?.title || '').replace(/\s+(?:T(?:emp\.)?|Season)\s*\d+\s*$/i, '').trim();
+      try {
+        raw = await providerCall('details',{kind:'vod',id:cleanId});
+        if (previous?.type === 'tv' && baseTitle && !raw?._liveLoaded && !(raw?.episodes?.length) && !((raw?.seasons?.length || 0) > 1)) {
+          await providerCall('search',{kind:'vod',query:baseTitle,page:1}).catch(()=>{});
+          raw = await providerCall('details',{kind:'vod',id:cleanId});
+        }
+      } catch (firstError) {
+        if (!baseTitle) throw firstError;
+        await providerCall('search',{kind:'vod',query:baseTitle,page:1}).catch(()=>{});
+        raw = await providerCall('details',{kind:'vod',id:cleanId});
+      }
+      return {...nebulaItem({...raw,_liveLoaded:true}),alternative:previous?.alternative};
+    } catch(error) {
+      if(previous)return {...previous,providerUnavailable:true};
+      throw error;
+    }
+  }
+  async function xuperReady() {
+    if (!Platform.nebulaCall || typeof SourceConnection === 'undefined') return false;
+    if (SourceConnection.isReady?.()) return true;
+    try { const st = await SourceConnection.ensure(); return Boolean(st?.configured); } catch { return false; }
+  }
+  async function xuperBrowseCategories(categories, safePage = 1, moreCatId = null) {
+    if (!categories?.length || !(await xuperReady())) return { items: [], hasMore: false };
+    let hasMore = false;
+    const seen = new Set();
+    const out = [];
+    const results = await Promise.allSettled(categories.map((catId) =>
+      cached(`xuper:cat:${catId}:${safePage}`, TTL.search, () => providerCall('catalog', { kind: 'vod', category: catId, page: safePage }))
+        .then((data) => ({ catId, data }))));
+    for (const res of results) {
+      if (res.status !== 'fulfilled' || !res.value?.data) continue;
+      const { catId, data } = res.value;
+      if (data.has_more && (safePage > 1 || catId === moreCatId)) hasMore = true;
+      for (const raw of (data.items || [])) {
+        if (!raw?.id || seen.has(String(raw.id))) continue;
+        seen.add(String(raw.id));
+        const item = nebulaItem({ ...raw, source_category: raw.source_category || catId });
+        const rank = out.length + (safePage - 1) * 50;
+        item.xuperPage = safePage;
+        item.xuperOrder = rank;
+        item.catalogOrder = -rank;
+        out.push(item);
+      }
+    }
+    return { items: out, hasMore };
+  }
+  async function xuperBrowseCatalog(categoryId, page = 1) {
+    const group = XUPER_BROWSE_GROUPS[categoryId];
+    if (!group) return { items: [], hasMore: false };
+    const safePage = Math.max(1, Number(page) || 1);
+    return xuperBrowseCategories(safePage === 1 ? group.primary : [group.more], safePage, group.more);
+  }
+  async function xuperPremieres() {
+    const res = await xuperBrowseCategories(XUPER_PREMIERE_CATS, 1, null);
+    return res.items.filter((item) => item.type !== 'tv');
+  }
+  async function nebulaRows() {
+    if (!(await xuperReady())) return [];
+    const [mv, tv, an] = await Promise.all([
+      xuperBrowseCatalog('movies', 1).catch(() => ({ items: [] })),
+      xuperBrowseCatalog('series', 1).catch(() => ({ items: [] })),
+      xuperBrowseCatalog('anime', 1).catch(() => ({ items: [] })),
+    ]);
+    const rows = [];
+    if (mv.items.length) rows.push({ title: 'Películas · Fuente adicional', items: mv.items.slice(0, 24) });
+    if (tv.items.length) rows.push({ title: 'Series · Fuente adicional', items: tv.items.slice(0, 24) });
+    if (an.items.length) rows.push({ title: 'Anime · Fuente adicional', items: an.items.slice(0, 24) });
+    return rows;
+  }
+  const withTimeout=(promise,ms)=>{let timer;return Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('timeout')),ms);})]).finally(()=>clearTimeout(timer));};
+  async function movieSources(detail) {
+    const unknown={providerId:'nebula',state:'unknown',sources:[]};
+    if(detail.type==='tv' || !Platform.nebulaCall) return unknown;
+    const key='nebula:src:'+detail.type+':'+detail.id+':'+String(detail.year||'').slice(0,4);
+    return cached(key,TTL.detail,()=>withTimeout(movieSourcesUncached(detail),8000)).then(result=>{if(!result.sources?.length)cache.delete(key);return result;}).catch(()=>{cache.delete(key);return unknown;});
+  }
+  async function movieSourcesUncached(detail) {
+    const unknown={providerId:'nebula',state:'unknown',sources:[]};
+    try {
+      const extraMovieNames=String(detail.othersNames||'').split(/[|,;/]+/).map(s=>s.trim()).filter(Boolean);
+      const movieLookup={...detail,originalTitle:detail.originalTitle||extraMovieNames[0]||''};
+      const names=[...new Set([detail.title,detail.originalTitle,...extraMovieNames].filter(Boolean))];
+      const year=String(detail.year||'').slice(0,4);
+      if(!year)return unknown;
+      const laxo=(t)=>String(t||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,' ').trim();
+      const anio=(v)=>Number(String(v||'').slice(0,4));
+      const sameYear=(v)=>{const a=anio(v),b=anio(year);return !a||!b||Math.abs(a-b)<=1;};
+      const pickMatch=(batches)=>{
+        for(const batch of batches){
+          if(batch.status!=='fulfilled'||!Array.isArray(batch.value))continue;
+          const exact=CatalogSources.identity.selectMatch(movieLookup,batch.value);
+          if(exact)return exact;
+        }
+        for(const batch of batches){
+          if(batch.status!=='fulfilled'||!Array.isArray(batch.value))continue;
+          const loose=batch.value.find((candidato)=>laxo(candidato.title)===laxo(detail.title)&&sameYear(candidato.year||candidato.release_date));
+          if(loose)return loose;
+        }
+        return null;
+      };
+      const batches=await Promise.allSettled(names.map(name=>nebulaSearch(name)));
+      let match=pickMatch(batches);
+      if(!match){
+        const canonicalId=String(detail.id||'').replace(/^tmdb:(?:movie|series):/,'');
+        const canonicalRaw=canonicalBackup('tmdb:movie:'+canonicalId);
+        if(canonicalRaw && sameYear(canonicalRaw.year))match=nebulaItem(canonicalRaw);
+      }
+      let liveBatches=[];
+      if(!match && Platform.nebulaCall){
+        const localOnlyNames=names.filter(name=>nebulaLocalSearch(name).length>0);
+        if(localOnlyNames.length){
+          liveBatches=await Promise.allSettled(localOnlyNames.map(name=>nebulaLiveSearch(name)));
+          match=pickMatch(liveBatches);
+        }
+      }
+      if(!match){const failed=[...batches,...liveBatches].find(batch=>batch.status==='rejected');if(failed)throw failed.reason;return unknown;}
+      let confirmed;
+      try{
+        confirmed=await providerCall('details',{kind:'vod',id:match.nebulaId});
+      }catch(detailError){
+        if(!Platform.nebulaCall)throw detailError;
+        await providerCall('search',{kind:'vod',query:match.title||detail.title,page:1}).catch(()=>{});
+        confirmed=await providerCall('details',{kind:'vod',id:match.nebulaId});
+      }
+      if(CatalogSources.identity.nebulaType(confirmed)==='tv')return unknown;
+      const options=await providerCall('playback.options',{kind:'vod',id:match.nebulaId});
+      const sources=(options.qualities||[]).flatMap(quality=>(quality.audio_languages?.length?quality.audio_languages:[{label:'Original',value:''}]).map(audio=>({name:quality.label+' · '+audio.label,size:'Fuente adicional',url:'nebula://source/'+encodeURIComponent(match.nebulaId)+'?'+new URLSearchParams({quality:quality.value,...(audio.value?{audio_language:audio.value}:{})})})));
+      if(!sources.length && /enlace directo/i.test(options.notice||''))sources.push({name:'Original · Fuente adicional',url:'nebula://source/'+encodeURIComponent(match.nebulaId)});
+      return {providerId:'nebula',state:sources.length?'available':'unknown',sources:sources.map((source)=>({...source,providerId:'nebula'}))};
+    } catch(error){
+      const code=String(error&&error.code||'').toLowerCase();
+      if(['session_required','runtime_missing','runtime_unavailable','storage_unavailable','runtime_config_invalid','runtime_busy'].includes(code)||/^Conecta la fuente adicional.*Ajustes/i.test(String(error?.message||'')))return {providerId:'nebula',state:'not_connected',sources:[]};
+      return CatalogSources.availability.failure('nebula',error);
+    }
+  }
+
+  const TTL = {
+    list: 15 * 60 * 1000,      // CONFIG_AUTO_REFRESH_TTL_MS del original: 15 min
+    detail: 60 * 60 * 1000,
+    search: 5 * 60 * 1000,
+  };
+
+  const cache = new Map();
+  const inflight = new Map();
+
+  function cacheGet(k, ttl) {
+    const hit = cache.get(k);
+    if (hit && Date.now() - hit.t < ttl) {cache.delete(k);cache.set(k,hit);return hit.v;}
+    if(hit)cache.delete(k);
+    return null;
+  }
+  function cacheSet(key,value){cache.delete(key);cache.set(key,value);while(cache.size>300)cache.delete(cache.keys().next().value);}
+
+  async function cached(key, ttl, producer) {
+    const hit = cacheGet(key, ttl);
+    if (hit) return hit;
+    if (inflight.has(key)) return inflight.get(key);
+    const p = producer()
+      .then((v) => { cacheSet(key, { t: Date.now(), v }); return v; })
+      .finally(() => inflight.delete(key));
+    inflight.set(key, p);
+    return p;
+  }
+
+  function token() {
+    // La clave propia de Ajustes tiene prioridad; si no hay, se usa la incorporada al compilar (scripts/tmdb-default.cjs).
+    return (Store.settings.tmdbToken || '').trim() || String(globalThis.NEBULA_TMDB_DEFAULT || '').trim();
+  }
+
+  async function tmdb(pathname, params = {}) {
+    const t = token();
+    const url = new URL(BASE + pathname);
+    url.searchParams.set('language', Store.settings.language || 'es-MX');
+    for (const [k, v] of Object.entries(params)) {
+      if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, v);
+    }
+    const headers = {};
+    const looksV4 = t.startsWith('eyJ');
+    if (looksV4) headers.Authorization = `Bearer ${t}`;
+    else url.searchParams.set('api_key', t);
+
+    const res = await fetch(url.href, { headers });
+    if (res.status === 404) return null;
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`TMDB HTTP ${res.status} ${body.slice(0, 120)}`);
+    }
+    return res.json();
+  }
+
+  const poster = (p, size = 'w342') => (p ? `${IMG}/${size}${p}` : null);
+  const backdrop = (p, size = 'w1280') => (p ? `${IMG}/${size}${p}` : null);
+
+  /* ---------------------- Filas de inicio ---------------------- */
+  async function homeRows() {
+    const rows = await Promise.allSettled([
+      tmdb('/trending/all/week'),
+      tmdb('/movie/popular'),
+      tmdb('/tv/popular'),
+      tmdb('/movie/top_rated'),
+      tmdb('/tv/top_rated'),
+      tmdb('/movie/now_playing'),
+    ]);
+    const labels = [
+      ['Tendencias', 'trend'],
+      ['Películas populares', 'movie'],
+      ['Series populares', 'tv'],
+      ['Mejor valoradas', 'all'],
+      ['Series mejor valoradas', 'tv'],
+      ['En cartelera / estrenos', 'movie'],
+    ];
+    const out = [];
+    rows.forEach((r, i) => {
+      if (r.status === 'fulfilled' && r.value && Array.isArray(r.value.results)) {
+        out.push({ title: labels[i][0], items: r.value.results.map(normalize).filter(Boolean) });
+      }
+    });
+    return out;
+  }
+
+  async function genres(type) {
+    const d = await cached(`genres:${type}`, 24 * 60 * 60 * 1000, () =>
+      tmdb(type === 'tv' ? '/genre/tv/list' : '/genre/movie/list'));
+    return (d && d.genres) || [];
+  }
+
+  async function byGenre(type, genreId, page = 1) {
+    const d = await cached(`disc:${type}:${genreId}:${page}`, TTL.list, () =>
+      tmdb(`/discover/${type}`, { with_genres: genreId, page, sort_by: 'popularity.desc' }));
+    return (d && d.results ? d.results : []).map(item=>normalize({...item,media_type:type})).filter(Boolean);
+  }
+
+  function normalize(r) {
+    if (!r) return null;
+    const type = r.media_type ? (r.media_type === 'tv' ? 'tv' : 'movie') : (r.first_air_date || r.name && r.release_date === undefined ? 'tv' : 'movie');
+    const isTv = type === 'tv';
+    const title = r.title || r.name || '';
+    if (!title) return null;
+    return {
+      kind: 'tmdb',
+      identities: [{providerId:'tmdb',id:String(r.id)}],
+      type,
+      id: r.id,
+      title,
+      originalTitle: r.original_title || r.original_name || '',
+      poster: poster(r.poster_path),
+      backdrop: backdrop(r.backdrop_path),
+      year: (r.release_date || r.first_air_date || '').slice(0, 4),
+      rating: r.vote_average ? Math.round(r.vote_average * 10) / 10 : null,
+      overview: r.overview || '',
+      genreIds: r.genre_ids || [],
+    };
+  }
+
+  /* ---------------------- Detalle ---------------------- */
+  async function movieDetail(id) {
+    const d = await cached(`md:${id}`, TTL.detail, () =>
+      tmdb(`/movie/${id}`, { append_to_response: 'credits,videos,external_ids', include_video_language: 'es,en,null' }));
+    if (!d) return null;
+    return {
+      ...normalize(d), kind: 'tmdb',
+      runtime: d.runtime,
+      genres: (d.genres || []).map((g) => g.name),
+      cast: (d.credits && d.credits.cast || []).slice(0, 14).map((c) => ({
+        name: c.name, role: c.character, img: c.profile_path ? poster(c.profile_path, 'w185') : null,
+      })),
+      trailer: pickTrailer(d.videos),
+    };
+  }
+
+  /* Nota puntual por id de TMDB (el catálogo no trae puntaje). */
+  async function ratingFor(type, id) {
+    if (!token() || !id) return null;
+    try {
+      const data = await cached(`rate:${type}:${id}`, TTL.detail, () => tmdb(`/${type === 'tv' ? 'tv' : 'movie'}/${id}`));
+      const score = data && data.vote_average ? Math.round(data.vote_average * 10) / 10 : null;
+      return MoviePlusUI.ratingValue(score);
+    } catch {
+      return null;
+    }
+  }
+
+  async function seriesDetail(id) {
+    const d = await cached(`sd:${id}`, TTL.detail, () =>
+      tmdb(`/tv/${id}`, { append_to_response: 'credits,videos,external_ids', include_video_language: 'es,en,null' }));
+    if (!d) return null;
+    return {
+      kind: 'tmdb', type: 'tv', id: d.id,
+      title: d.name || d.original_name,
+      originalTitle: d.original_name,
+      poster: poster(d.poster_path),
+      backdrop: backdrop(d.backdrop_path),
+      year: (d.first_air_date || '').slice(0, 4),
+      rating: d.vote_average ? Math.round(d.vote_average * 10) / 10 : null,
+      overview: d.overview || '',
+      genres: (d.genres || []).map((g) => g.name),
+      seasons: (d.seasons || []).filter((s) => s.season_number > 0).map((s) => ({
+        season: s.season_number, name: s.name, episodeCount: s.episode_count,
+      })),
+      cast: (d.credits && d.credits.cast || []).slice(0, 14).map((c) => ({
+        name: c.name, role: c.character, img: c.profile_path ? poster(c.profile_path, 'w185') : null,
+      })),
+      trailer: pickTrailer(d.videos),
+    };
+  }
+
+  function pickTrailer(videos) {
+    const candidates=((videos&&videos.results)||[]).filter(v=>v.site==='YouTube'&&['Trailer','Teaser'].includes(v.type)&&/^[A-Za-z0-9_-]{11}$/.test(v.key||''));
+    candidates.sort((a,b)=>(a.type==='Trailer'?0:1)-(b.type==='Trailer'?0:1)||({es:0,en:1}[a.iso_639_1]??2)-({es:0,en:1}[b.iso_639_1]??2)||Number(!!b.official)-Number(!!a.official));
+    return candidates.length?'https://www.youtube.com/watch?v='+candidates[0].key:null;
+  }
+
+  async function detailDiscovery(type,id){
+    if(!['movie','tv'].includes(type)||!/^\d+$/.test(String(id)))return {};
+    return cached(`discovery:${type}:${id}`,TTL.detail,async()=>{
+      const data=await tmdb(`/${type}/${id}`,{append_to_response:'videos,recommendations,similar',include_video_language:'es,en,null'});if(!data)return {};
+      const rows=values=>(values||[]).filter(v=>String(v.id)!==String(id)).map(v=>normalize({...v,media_type:type})).filter(Boolean).slice(0,24);
+      let trailer=pickTrailer(data.videos);if(!trailer)try{trailer=pickTrailer(await tmdb(`/${type}/${id}/videos`,{language:'en-US'}));}catch{}
+      const result={trailer,recommendations:rows(data.recommendations?.results),similar:rows(data.similar?.results),collection:[],related:[]};
+      if(type==='movie'&&data.belongs_to_collection?.id)try{const collection=await tmdb(`/collection/${data.belongs_to_collection.id}`);result.collectionName=collection?.name||'';result.collection=rows([...(collection?.parts||[])].sort((a,b)=>(a.release_date||'9999').localeCompare(b.release_date||'9999')));}catch{}
+      if(type==='tv')try{
+        const query=`SELECT DISTINCT ?tmdb ?media ?relatedLabel ?date ?image WHERE {
+   ?show wdt:P4983 "${id}" .
+   { { ?show (wdt:P155|wdt:P156|wdt:P2512|^wdt:P155|^wdt:P156|^wdt:P2512) ?related . }
+     UNION { ?show (wdt:P179|wdt:P8345) ?group . ?related (wdt:P179|wdt:P8345) ?group . }
+     UNION { ?show p:P179/(pq:P155|pq:P156) ?related . }
+     UNION { ?related p:P179/(pq:P155|pq:P156) ?show . } }
+   { { ?related wdt:P4983 ?tmdb . BIND("tv" AS ?media) } UNION { ?related wdt:P4947 ?tmdb . BIND("movie" AS ?media) } }
+   FILTER(?related != ?show)
+   OPTIONAL { ?related wdt:P577 ?date . } OPTIONAL { ?related wdt:P18 ?image . }
+   SERVICE wikibase:label { bd:serviceParam wikibase:language "es,en" . }
+  } LIMIT 20`;
+        const response=await fetch('https://query.wikidata.org/sparql?format=json&query='+encodeURIComponent(query),{signal:AbortSignal.timeout(5000),headers:{Accept:'application/sparql-results+json'}});
+        if(response.ok){const value=await response.json();const seen=new Set();result.related=(value.results?.bindings||[]).filter(v=>/^\d+$/.test(v.tmdb?.value||'')&&v.tmdb.value!==String(id)&&!seen.has((v.media?.value||'tv')+':'+v.tmdb.value)&&seen.add((v.media?.value||'tv')+':'+v.tmdb.value)).map(v=>{const image=String(v.image?.value||'').replace('http://commons.wikimedia.org/','https://commons.wikimedia.org/');return {kind:'tmdb',type:v.media?.value==='movie'?'movie':'tv',id:Number(v.tmdb.value),title:v.relatedLabel?.value||'',year:(v.date?.value||'').slice(0,4),poster:image.startsWith('https://commons.wikimedia.org/wiki/Special:FilePath/')?image+'?width=342':'',identities:[{providerId:'tmdb',id:v.tmdb.value}]};}).filter(v=>v.title&&!/^Q\d+$/.test(v.title));}
+      }catch{}
+      return result;
+    });
+  }
+
+  /** Episodios (EpisodeExtra: season, episode, name, overview, stillPath) */
+  async function seasonEpisodes(id, season) {
+    const d = await cached(`eps:${id}:${season}`, TTL.detail, () =>
+      tmdb(`/tv/${id}/season/${season}`));
+    if (!d) return [];
+    return (d.episodes || []).map((e) => ({
+      season,
+      episode: e.episode_number,
+      name: e.name || `Episodio ${e.episode_number}`,
+      overview: e.overview || '',
+      still: e.still_path ? `${IMG}/w300${e.still_path}` : null,
+      runtime: e.runtime || null,
+      air: e.air_date || '',
+    }));
+  }
+
+  /* ---------------------- Búsqueda (ActivityMain.apiSearch) ---------------------- */
+  const SEARCH_DEBOUNCE_MS = 300;   // REALTIME_SEARCH_DEBOUNCE_MS observado
+  const SEARCH_MIN_CHARS = 2;       // REALTIME_SEARCH_MIN_CHARS observado
+
+  const searchText = CatalogSources.identity.normalizeTitle;
+  const relevance = MoviePlusCore.relevance;
+  const searchRank = MoviePlusCore.searchRank || relevance;
+  const searchStopWords = new Set(['the','and','for','del','las','los','una','uno','con','por','sin']);
+  function liveMatchesKnownFranchise(liveItem, refs) {
+    if (!liveItem?.raw?._liveSearch || !refs.length) return false;
+    const baseTitle = searchText(String(liveItem.title || '').replace(/\s*(?:-|–)?\s*(?:Spanish\s+audio|Espa[ñn]ol\s+Latino)\s*/gi, ' ').replace(/\s+(?:T(?:emp\.?|emporada)?|Season)\s*\d+\s*$/i, ''));
+    const tokens = baseTitle.split(/\s+/).filter(t => t.length >= 3 && !searchStopWords.has(t));
+    if (!tokens.length) return false;
+    for (const ref of refs) {
+      const refText = searchText([ref.title, ref.originalTitle, ...(ref.aliases || []), ref.othersNames].filter(Boolean).join(' '));
+      if (!refText) continue;
+      if (refText.includes(baseTitle) && baseTitle.length >= 6) return true;
+      const refSet = new Set(refText.split(/\s+/).filter(Boolean));
+      const matched = tokens.filter(t => refSet.has(t)).length;
+      if (tokens.length >= 2 && matched >= 2 && matched / tokens.length >= 0.6) return true;
+    }
+    return false;
+  }
+  async function search(query, mode = 'multi', page = 1) {
+    const q = (query || '').trim();
+    if (q.length < SEARCH_MIN_CHARS) return { results: [], people: [] };
+    const pathByMode = {
+      multi: '/search/multi',
+      title: '/search/multi',
+      person: '/search/person',
+      tmdbId: null,
+    };
+    if (mode === 'tmdbId') {
+      const id = /^\d+$/.test(q)?Number(q):0;
+      if (!Number.isSafeInteger(id)||id<=0) return { results: [], people: [] };
+      const results = [];
+      const mv = await tmdb(`/movie/${id}`).catch(() => null);
+      if (mv) results.push(normalize({ ...mv, media_type: 'movie' }));
+      const tv = await tmdb(`/tv/${id}`).catch(() => null);
+      if (tv) results.push(normalize({ ...tv, media_type: 'tv' }));
+      return { results: results.filter(Boolean), people: [] };
+    }
+    const d = await cached(`s:${mode}:${q}:${page}`, TTL.search, () =>
+      tmdb(pathByMode[mode], { query: q, page, include_adult: false })).catch(() => null);
+    const out = { results: [], people: [] };
+    (d && d.results || []).forEach((r) => {
+      if (mode === 'person' || r.media_type === 'person') {
+        if (mode !== 'title') out.people.push({ id: r.id, name: r.name, img: poster(r.profile_path, 'w185'), known: r.known_for_department });
+      } else {
+        const n = normalize(r);
+        if (n) out.results.push(n);
+      }
+    });
+    out.total = (d && d.total_results) || 0;
+    if (mode === 'multi' || mode === 'title') {
+      const local=await providerCatalog.search(q,['movieplus']);
+      const matches=local[0]?.items||[];
+      out.results = [...matches, ...out.results.filter(item => !matches.some(candidate=>CatalogSources.identity.compare(item,candidate)==='id') && !CatalogSources.identity.selectMatch(item,matches))];
+      out.total = Math.max(out.total, out.results.length);
+    }
+
+    // Fusionar fuentes locales del usuario (Archive.org + Jellyfin) solo en modo título/todo
+    if (mode === 'multi' || mode === 'title') {
+      const batches=await providerCatalog.search(q,['archive','jellyfin','nebula']);
+      const [arch,jf,nebula]=batches.map(batch=>batch.error?{status:'rejected',reason:Error(batch.error)}:{status:'fulfilled',value:batch.items});
+      const extras = [
+        ...(arch.status === 'fulfilled' ? arch.value : []),
+        ...(jf.status === 'fulfilled' ? jf.value : []),
+      ];
+      const tmdbIds = new Set(out.results.map((r) => `${r.type}:${r.id}`));
+      extras.forEach((x) => { const id = `${x.type}:${x.id}`; if (!tmdbIds.has(id) && relevance(x, q) < 4) { out.results.push(x); tmdbIds.add(id); } });
+      if(nebula.status==='fulfilled'){
+        const catalogs=catalogIndexNow(),primary=[...catalogs.movies,...catalogs.series];
+        const refs = out.results.filter(item => relevance(item, q) < 4);
+        const enrichedNebula = nebula.value.map(item => relevance(item, q) < 4 || !liveMatchesKnownFranchise(item, refs) ? item : { ...item, _franchiseMatched: true, aliases: [...new Set([...(item.aliases || []), q])] });
+        const completed=MoviePlusCore.completeSearch(primary,enrichedNebula,q);
+        for(const item of completed.primary)if(!out.results.some(existing=>CatalogSources.identity.compare(item,existing)==='id'))out.results.unshift(item);
+        for(const item of completed.backup){
+          const match=CatalogSources.identity.selectMatch(item,out.results);
+          if(match&&match.kind!=='catalog'){
+            match.additionalSource=true;match.nebulaId=item.nebulaId;match.aliases=[...new Set([...(match.aliases||[]),...(item.aliases||[])])];
+            nebulaByCatalog.set(String(match.id),item.nebulaId);
+          }else if(!match)out.results.push(item);
+        }
+      }
+      out.notice = batches.filter(batch=>batch.error&&batch.state!=='not_connected').map(batch=>batch.providerId+': '+CatalogSources.availability.message(batch)).join(' · ');
+      out.results = out.results.filter(item => item._franchiseMatched || relevance(item, q) < 4);
+      out.results.sort((a,b)=>Number(b.kind==='catalog')-Number(a.kind==='catalog')||searchRank(a,q)-searchRank(b,q));
+      out.total = out.results.length;
+    }
+    return out;
+  }
+
+  async function personTitles(id) {
+    if (!/^[1-9]\d*$/.test(String(id))) throw new Error('Persona inválida');
+    const credits = await cached('person:' + id, TTL.detail, () => tmdb('/person/' + id + '/combined_credits'));
+    await loadCatalogs(Store.settings.catalogUrls || []);
+    const unique = new Map();
+    for (const raw of [...(credits?.cast || [])].sort((a, b) => (b.popularity || 0) - (a.popularity || 0))) {
+      if (!['movie', 'tv'].includes(raw.media_type)) continue;
+      const item = normalize(raw);
+      if (!item) continue;
+      const key = item.type + ':' + item.id;
+      if (!unique.has(key)) unique.set(key, findCatalogItem(item.type, item.id) || item);
+    }
+    return [...unique.values()];
+  }
+
+  /* ---------------------- Catálogos externos (formato MoviePlus) ---------------------- */
+  function mapCatalogItem(raw, fallbackType) {
+    const type = MoviePlusCore.catalogMediaType(raw.type,fallbackType);
+    const resolutions = String(raw.resolutions || '');
+    const posterUrl = /^\/[A-Za-z0-9_.-]+$/.test(raw.urlImage || '') ? poster(raw.urlImage) : raw.urlImage || '';
+    const sources = CatalogSources.parse(raw.urls, raw.resolutions);
+    const available = sources.filter(source => source.url);
+    return {
+      kind: 'catalog',
+      type,
+      id: raw.id,
+      title: raw.nameFile || `Item ${raw.id}`,
+      othersNames: raw.othersNames || '',
+      poster: posterUrl,
+      backdrop: posterUrl,
+      year: String(raw.date || raw.year || '').slice(0,4),
+      rating: raw.vote || null,
+      genreIds: raw.generos || [],
+      resolutions,
+      qualities: available,
+      unavailableSources: sources.filter(source => !source.url),
+      urls: available.map(source => source.url),
+      isDes: !!raw.isDes,
+      raw,
+    };
+  }
+
+  function parseResolutions(res) {
+    // "720p|1080p|4K" u objeto con tamaños según origen; soporta formato simple
+    return String(res || '').split(/[|,;/]+/).map((s) => s.trim()).filter(Boolean)
+      .map((n) => ({ name: n, size: '' }));
+  }
+
+  let builtinParsed=null;
+  async function loadCatalog(url) {
+    const res = url === 'movieplus:catalog' ? await Platform.defaultCatalog() : await Platform.catalogFetch(url);
+    if (!res.ok) throw new Error(res.error || `HTTP ${res.status} en catálogo`);
+    if(url==='movieplus:catalog'&&builtinParsed&&((res.releaseId&&res.releaseId===builtinParsed.releaseId)||(!res.releaseId&&res.text===builtinParsed.text)))return builtinParsed.value;
+    const text = res.text;
+    let data;
+    try { data = JSON.parse(text); }
+    catch { throw new Error('El catálogo no es JSON válido'); }
+    const list = Array.isArray(data) ? data : null;
+    const movieRows = list ? list.filter(row => MoviePlusCore.catalogMediaType(row.type,'movie') === 'movie') : data.movies || data.peliculas;
+    const seriesRows = list ? list.filter(row => MoviePlusCore.catalogMediaType(row.type,'movie') === 'tv') : data.series;
+    if (!Array.isArray(movieRows) && !Array.isArray(seriesRows)) throw new Error('El JSON no contiene una lista de películas o series');
+    const map = (rows, type) => {
+      const list = (Array.isArray(rows) ? rows : []).filter(m => m && (m.id || m.nameFile));
+      const baseOrder = Math.max(1000000, list.length);
+      return list.map((m, index) => {
+        const identities = [{ providerId: 'catalog:' + url, id: String(m.id) }];
+        const tmdbId = url === 'movieplus:catalog' ? m.id : m.tmdbId || m.tmdb_id;
+        if (/^\d+$/.test(String(tmdbId))) identities.push({ providerId: 'tmdb', id: String(tmdbId) });
+        const hasOrder = m.json_order !== null && m.json_order !== undefined && m.json_order !== '' && Number.isFinite(Number(m.json_order));
+        const fallbackOrder = baseOrder - (list.length - 1 - index);
+        const item = { ...mapCatalogItem(m, type), ...(url === 'movieplus:catalog' ? { genreIds: MoviePlusCore.moviePlusGenreIds(m.generos) } : {}), catalogType: Number(m.type) || 0, catalogOrder: hasOrder ? Number(m.json_order) : fallbackOrder, catalogUrl: url, identities };
+        return { ...item, aliases: [...new Set([...(item.aliases || []), ...(url === 'movieplus:catalog' ? searchSnapshot.primaryAliases?.[type + ':' + tmdbId] || [] : [])])], identityKey: CatalogSources.identity.key(item) };
+      });
+    };
+    const value={ url, movies: map(movieRows, 'movie'), series: map(seriesRows, 'series') };
+    if(url==='movieplus:catalog')builtinParsed={releaseId:res.releaseId||'',text:res.releaseId?'':res.text,value};
+    return value;
+  }
+
+  const catalogsCache = new Map();
+  /* El catálogo de la fuente no trae puntaje: se completa con el de TMDB ya visto. */
+  function applyRatingCache(cat) {
+    const cache = (Store.settings && Store.settings.ratingCache) || null;
+    if (!cache || typeof cache !== 'object') return cat;
+    for (const item of [...cat.movies, ...cat.series]) {
+      if (!item) continue;
+      const raw = item.rating;
+      const numeric = raw === null || raw === undefined || raw === '' ? NaN : Number(String(raw).replace(',', '.'));
+      if (Number.isFinite(numeric) && numeric > 0) continue;
+      const cached = cache[item.type + ':' + item.id];
+      if (cached) item.rating = cached;
+    }
+    return cat;
+  }
+  async function loadCatalogs(urls = [], options = {}) {
+    urls = [...new Set([...(Store.settings.builtinCatalog !== false ? ['movieplus:catalog'] : []), ...urls])];
+    const force = Boolean(options && options.force);
+    // Con allowStale se responde con lo que ya está en memoria y se actualiza en segundo plano:
+    // evita copiar el catálogo completo por IPC o por el puente antes de reproducir o abrir una ficha.
+    if (options && options.allowStale && !force && urls.length && urls.every((url) => catalogsCache.has(url))) {
+      // El refresco espera unos segundos para no competir con la apertura del reproductor o de la ficha.
+      const refresh = setTimeout(() => { loadCatalogs(urls).catch(() => {}); }, 5000);
+      refresh?.unref?.();
+      const items = [];
+      for (const url of urls) { const cat = catalogsCache.get(url); items.push(...cat.movies, ...cat.series); }
+      return { items, errors: [], notices: [] };
+    }
+    for(const url of catalogsCache.keys())if(!urls.includes(url)){catalogsCache.delete(url);cache.delete('cat:'+url);}
+    if(force)for(const url of urls)cache.delete('cat:'+url);
+    const out = { items: [], errors: [], notices: [] };
+    const profile=urls.some(CatalogSources.isTestCatalog)?await Platform.runtimeInfo?.().catch(()=>({profile:'user'})):null;
+    await Promise.allSettled(urls.map(async (u) => {
+      if(CatalogSources.isTestCatalog(u) && profile?.profile!=='qa'){
+        catalogsCache.delete(u);
+        if(!out.notices.length)out.notices.push('Se omitió un catálogo de pruebas fuera del perfil QA. Puedes revisarlo en Ajustes.');
+        return;
+      }
+      try {
+        const cat = applyRatingCache(await cached(`cat:${u}`,u==='movieplus:catalog'?30000:TTL.list,()=>loadCatalog(u)));
+        catalogsCache.set(u, cat);
+        out.items.push(...cat.movies, ...cat.series);
+      } catch (e) {
+        catalogsCache.delete(u);
+        out.errors.push(`${u}: ${e.message}`);
+      }
+    }));
+    syncCatalogIndex();
+    return out;
+  }
+
+  let catalogIndex=null,catalogGeneration=0;
+  const catalogLookupMemo=new WeakMap();
+  let indexSources=new Map();
+  function invalidateCatalogIndex(){catalogIndex=null;catalogGeneration++;}
+  /* Solo reindexa si el contenido del caché cambió de verdad (por referencia). */
+  function syncCatalogIndex(){
+    let changed=indexSources.size!==catalogsCache.size;
+    if(!changed)for(const [url,cat] of catalogsCache){if(indexSources.get(url)!==cat){changed=true;break;}}
+    if(!changed)return;
+    indexSources=new Map(catalogsCache);
+    invalidateCatalogIndex();
+  }
+  function catalogIndexNow(){
+    if(catalogIndex)return catalogIndex;
+    const movies=[],series=[],byIdentity=new Map(),byNameYear=new Map();
+    const add=item=>{
+      for(const ident of (item.identities||[])){const key=ident.providerId+':'+ident.id;const list=byIdentity.get(key);if(list)list.push(item);else byIdentity.set(key,[item]);}
+      const year=CatalogSources.identity.year(item);
+      if(year)for(const name of CatalogSources.identity.names(item)){const key=name+'|'+year;const list=byNameYear.get(key);if(list){if(!list.includes(item))list.push(item);}else byNameYear.set(key,[item]);}
+    };
+    for(const cat of catalogsCache.values()){
+      for(const item of cat.movies){movies.push(item);add(item);}
+      for(const item of cat.series){series.push(item);add(item);}
+    }
+    catalogIndex={movies,series,byIdentity,byNameYear};
+    return catalogIndex;
+  }
+  function resolveCatalogItem(type,id,identity){
+    const index=catalogIndexNow();
+    if(identity){
+      for(const ident of (CatalogSources.identity.identities(identity)||[])){
+        for(const item of index.byIdentity.get(ident.providerId+':'+ident.id)||[]){
+          if(CatalogSources.identity.compare(identity,item)==='id')return item;
+        }
+      }
+      const year=CatalogSources.identity.year(identity);
+      if(!year)return null;
+      const near=new Set();
+      for(const name of CatalogSources.identity.names(identity)){
+        for(const item of index.byNameYear.get(name+'|'+year)||[])near.add(item);
+      }
+      return near.size?CatalogSources.identity.selectMatch(identity,[...near]):null;
+    }
+    const pool=index.movies.concat(index.series);
+    const confirmed=pool.find(item=>item.type===type&&item.identities?.some(ident=>ident.providerId==='tmdb'&&String(ident.id)===String(id)));
+    if(confirmed)return confirmed;
+    const legacy=pool.filter(item=>item.type===type&&String(item.id)===String(id));
+    return legacy.length===1?legacy[0]:null;
+  }
+  /** Ítem de un catálogo ya cargado en memoria, sin esperar red ni IPC (para pintar la ficha al instante). */
+  function cachedCatalogItem(id,catalogUrl){
+    const cat=catalogsCache.get(catalogUrl);
+    if(!cat)return null;
+    return cat.movies.find(item=>String(item.id)===String(id))||cat.series.find(item=>String(item.id)===String(id))||null;
+  }
+  function findCatalogItem(type,id,identity){
+    if(identity&&typeof identity==='object'){
+      const memo=catalogLookupMemo.get(identity);
+      if(memo&&memo.generation===catalogGeneration)return memo.value;
+      const value=resolveCatalogItem(type,id,identity);
+      catalogLookupMemo.set(identity,{generation:catalogGeneration,value});
+      return value;
+    }
+    return resolveCatalogItem(type,id,identity);
+  }
+  async function catalogEpisodes(id) {
+    const result = await Platform.seriesEpisodes(id);
+    if (!result.ok) throw new Error(result.error || 'No se pudieron cargar los capítulos');
+    return result.episodes;
+  }
+
+  function catalogHomeRows() {
+    const rows = [];
+    for (const [url, cat] of catalogsCache) {
+      if (cat.movies.length) rows.push({ title: `🎬 Catálogo: películas`, items: cat.movies.slice(0, 30), catalogUrl: url });
+      if (cat.series.length) rows.push({ title: `🎬 Catálogo: series`, items: cat.series.slice(0, 30), catalogUrl: url });
+    }
+    return rows;
+  }
+
+  /* ==================== Fuentes legales ====================
+   * Archive.org (dominio público, MP4 directos + .srt) y Jellyfin
+   * (servidor propio del usuario, API oficial). Fetch por IPC sin CORS. */
+
+  async function bridgeJson(url, ttlMs) {
+    const key = `nf:${url}`;
+    if (ttlMs) {
+      const hit = cacheGet(key, ttlMs);
+      if (hit) return hit;
+    }
+    const r = await Platform.netFetch(url);
+    let data = null;
+    try { data = JSON.parse(r.text); } catch {}
+    if (!r.ok) throw new Error(`HTTP ${r.status} ${String(r.text).slice(0, 80)}`);
+    if (data === null) throw new Error('Respuesta no JSON');
+    if (ttlMs) cacheSet(key, { t: Date.now(), v: data });
+    return data;
+  }
+
+  /* ---------------- Archive.org (dominio público) ---------------- */
+  const ARCHIVE_SEARCH = 'https://archive.org/advancedsearch.php';
+  const ARCHIVE_FIELDS = '&fl%5B%5D=identifier&fl%5B%5D=title&fl%5B%5D=year&fl%5B%5D=description&fl%5B%5D=downloads&output=json';
+
+  function archiveNormalize(doc) {
+    if (!doc || !doc.identifier) return null;
+    return {
+      kind: 'archive',
+      type: 'movie',
+      id: doc.identifier,
+      title: Array.isArray(doc.title) ? doc.title[0] : (doc.title || doc.identifier),
+      poster: `https://archive.org/services/img/${doc.identifier}`,
+      backdrop: `https://archive.org/services/img/${doc.identifier}`,
+      year: String(Array.isArray(doc.year) ? doc.year[0] : (doc.year || '')),
+      rating: null,
+      overview: String((Array.isArray(doc.description) ? doc.description[0] : doc.description) || '')
+        .replace(/<[^>]*>/g, ' ').trim().slice(0, 400),
+      downloads: doc.downloads || 0,
+    };
+  }
+
+  async function archiveRows() {
+    try {
+      const base = 'collection:(feature_films) AND mediatype:(movies) AND format:(MPEG4)';
+      const popular = await bridgeJson(
+        `${ARCHIVE_SEARCH}?q=${encodeURIComponent(base)}&sort%5B%5D=downloads+desc&rows=40&page=1${ARCHIVE_FIELDS}`,
+        TTL.list);
+      const scifi = await bridgeJson(
+        `${ARCHIVE_SEARCH}?q=${encodeURIComponent(base + ' AND subject:("science fiction")')}&sort%5B%5D=downloads+desc&rows=24&page=1${ARCHIVE_FIELDS}`,
+        TTL.list);
+      const horror = await bridgeJson(
+        `${ARCHIVE_SEARCH}?q=${encodeURIComponent(base + ' AND subject:(horror)')}&sort%5B%5D=downloads+desc&rows=24&page=1${ARCHIVE_FIELDS}`,
+        TTL.list);
+      const rows = [];
+      if (popular?.response?.docs) rows.push({ title: '📽️ Clásicos de dominio público — más vistos', items: popular.response.docs.map(archiveNormalize).filter(Boolean) });
+      if (scifi?.response?.docs) rows.push({ title: '🛸 Ciencia ficción clásica', items: scifi.response.docs.map(archiveNormalize).filter(Boolean) });
+      if (horror?.response?.docs) rows.push({ title: '👻 Terror clásico', items: horror.response.docs.map(archiveNormalize).filter(Boolean) });
+      return rows;
+    } catch {
+      return [];
+    }
+  }
+
+  async function archiveSearch(q) {
+      const d = await bridgeJson(
+        `${ARCHIVE_SEARCH}?q=${encodeURIComponent(`title:("${q.replace(/["\\]/g, ' ')}") AND mediatype:(movies) AND format:(MPEG4)`)}&sort%5B%5D=downloads+desc&rows=24&page=1${ARCHIVE_FIELDS}`,
+        TTL.search);
+      return (d?.response?.docs || []).map(archiveNormalize).filter(item => item && relevance(item, q) < 4);
+  }
+
+  async function archiveDetail(id) {
+    const meta = await bridgeJson(`https://archive.org/metadata/${id}`, TTL.detail);
+    if (!meta || (!meta.files && !meta.metadata)) throw new Error('Sin datos en Archive.org');
+    const files = meta.files || [];
+    const videoExts = ['.mp4', '.m4v', '.ogv', '.webm'];
+    const videos = files
+      .filter((f) => videoExts.some((e) => f.name.toLowerCase().endsWith(e)))
+      .sort((a, b) => (parseInt(b.size || '0', 10) || 0) - (parseInt(a.size || '0', 10) || 0));
+    const subs = files.filter((f) => f.name.toLowerCase().endsWith('.srt') || f.name.toLowerCase().endsWith('.vtt'));
+    const m = meta.metadata || {};
+    const fmtSize = (n) => { const v = parseInt(n || '0', 10); return v > 0 ? fmtBytesArchive(v) : ''; };
+    // Deduplicar por etiqueta (varios derivados con el mismo nombre) y limitar la lista:
+    // preferir MP4 (compatible con Chromium) sobre OGV, y quedarse con el mayor de cada etiqueta.
+    const seenLabels = new Set();
+    const mp4s = videos.filter((f) => f.name.toLowerCase().endsWith('.mp4') || f.name.toLowerCase().endsWith('.m4v'));
+    const others = videos.filter((f) => !mp4s.includes(f));
+    const picked = [];
+    for (const f of [...mp4s, ...others]) {
+      const h = f.height ? `${f.height}p` : '';
+      const label = `${(f.name.split('.').pop() || 'mp4').toUpperCase()}${h ? ' ' + h : ''}`;
+      if (seenLabels.has(label)) continue;
+      seenLabels.add(label);
+      picked.push({
+        name: label,
+        size: fmtSize(f.size),
+        url: `https://archive.org/download/${id}/${encodeURIComponent(f.name).replace(/%2F/gi, '/')}`,
+      });
+      if (picked.length >= 10) break;
+    }
+    return {
+      kind: 'archive', type: 'movie', id,
+      title: m.title || id,
+      poster: `https://archive.org/services/img/${id}`,
+      backdrop: `https://archive.org/services/img/${id}`,
+      year: String(m.year || m.date || '').slice(0, 4),
+      rating: null,
+      overview: String(m.description || '').replace(/<[^>]*>/g, ' ').trim(),
+      sources: picked,
+      subtitles: subs.map((f) => ({ name: f.name, url: `https://archive.org/download/${id}/${encodeURIComponent(f.name)}` })),
+    };
+  }
+
+  function fmtBytesArchive(n) {
+    const u = ['B', 'KB', 'MB', 'GB'];
+    let i = 0;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return `${n.toFixed(i === 0 ? 0 : 1)} ${u[i]}`;
+  }
+
+  /* ---------------- Jellyfin (servidor propio, API oficial) ---------------- */
+  function jellyfinBase() {
+    const s = Store.settings;
+    const base = (s.jellyfinUrl || '').trim().replace(/\/+$/, '');
+    const key = (s.jellyfinKey || '').trim();
+    return base && key ? { base, key } : null;
+  }
+  function jellyfinImg(base, key, itemId, type = 'Primary', max = 342) {
+    return `${base}/Items/${itemId}/Images/${type}?api_key=${key}&maxWidth=${max}`;
+  }
+  function jellyfinStream(base, key, itemId) {
+    return `${base}/Videos/${itemId}/master.m3u8?api_key=${key}&MediaSourceId=${itemId}&VideoCodec=h264&AudioCodec=aac,mp3`;
+  }
+
+  function jellyfinNormalize(base, key, it) {
+    if (!it || !it.Id) return null;
+    return {
+      kind: 'jellyfin',
+      type: it.Type === 'Series' || it.Type === 'Episode' ? 'tv' : 'movie',
+      id: it.Id,
+      seriesId: it.SeriesId || null,
+      title: it.SeriesName && it.Type === 'Episode' ? `${it.SeriesName} — ${it.Name}` : (it.Name || 'Sin título'),
+      poster: jellyfinImg(base, key, it.Id, 'Primary'),
+      backdrop: jellyfinImg(base, key, it.Id, 'Backdrop', 1280),
+      year: it.ProductionYear ? String(it.ProductionYear) : '',
+      rating: it.CommunityRating ? Math.round(it.CommunityRating * 10) / 10 : null,
+      overview: it.Overview || '',
+      episode: it.Type === 'Episode' ? { season: it.ParentIndexNumber, number: it.IndexNumber } : null,
+    };
+  }
+
+  async function jellyfinRows() {
+    const jf = jellyfinBase();
+    if (!jf) return [];
+    try {
+      const d = await bridgeJson(
+        `${jf.base}/Items?api_key=${jf.key}&Recursive=true&IncludeItemTypes=Movie,Series&SortBy=SortName&Limit=40&Fields=PrimaryImageAspectRatio,Overview,ProductionYear,CommunityRating`,
+        TTL.list);
+      const recent = await bridgeJson(
+        `${jf.base}/Items?api_key=${jf.key}&Recursive=true&IncludeItemTypes=Movie,Series&SortBy=DateCreated&SortOrder=Descending&Limit=40&Fields=PrimaryImageAspectRatio,Overview,ProductionYear,CommunityRating`,
+        TTL.list);
+      const rows = [];
+      if (d?.Items?.length) rows.push({ title: `🏠 Tu Jellyfin — Biblioteca`, items: d.Items.map((x) => jellyfinNormalize(jf.base, jf.key, x)).filter(Boolean) });
+      if (recent?.Items?.length) rows.push({ title: `🆕 Tu Jellyfin — Añadido recientemente`, items: recent.Items.map((x) => jellyfinNormalize(jf.base, jf.key, x)).filter(Boolean) });
+      return rows;
+    } catch (e) {
+      return [{ title: `⚠️ Jellyfin (${String(e.message).slice(0, 60)})`, items: [] }];
+    }
+  }
+
+  async function jellyfinSearch(q) {
+    const jf = jellyfinBase();
+    if (!jf) return [];
+      const d = await bridgeJson(
+        `${jf.base}/Items?api_key=${jf.key}&searchTerm=${encodeURIComponent(q)}&Recursive=true&IncludeItemTypes=Movie,Series&Limit=20&Fields=PrimaryImageAspectRatio,Overview,ProductionYear,CommunityRating`,
+        TTL.search);
+      return (d?.Items || []).map((x) => jellyfinNormalize(jf.base, jf.key, x)).filter(Boolean);
+  }
+
+  async function jellyfinDetail(id) {
+    const jf = jellyfinBase();
+    if (!jf) throw new Error('Jellyfin no configurado');
+    const it = await bridgeJson(`${jf.base}/Items/${id}?api_key=${jf.key}`, TTL.detail);
+    if (!it || !it.Id) throw new Error('Elemento no encontrado');
+    const base = jellyfinNormalize(jf.base, jf.key, it);
+    const seasons = [];
+    if (base.type === 'tv') {
+      const sd = await bridgeJson(`${jf.base}/Shows/${id}/Seasons?api_key=${jf.key}`, TTL.detail);
+      (sd?.Items || []).forEach((s) => {
+        if (s.IndexNumber > 0 || (s.IndexNumber === undefined)) {
+          seasons.push({ season: s.IndexNumber ?? 1, name: s.Name || `Temporada ${s.IndexNumber}`, seasonId: s.Id });
+        }
+      });
+    }
+    return { ...base, genres: it.Genres || [], runtime: it.RunTimeTicks ? Math.round(it.RunTimeTicks / 600000000) : null, seasons };
+  }
+
+  async function jellyfinEpisodes(seriesId, seasonId) {
+    const jf = jellyfinBase();
+    if (!jf) throw new Error('Jellyfin no configurado');
+    const d = await bridgeJson(
+      `${jf.base}/Shows/${seriesId}/Episodes?api_key=${jf.key}&SeasonId=${seasonId}&Fields=Overview,PrimaryImageAspectRatio,ProductionYear`,
+      TTL.detail);
+    const episodes=(d?.Items || []).map((x) => jellyfinNormalize(jf.base, jf.key, x));
+    if(Platform.registerSources)for(const episode of episodes){const sources=await Platform.registerSources([{name:'HLS · Jellyfin',url:jellyfinPrivateStreamUrl(episode.id)}]);jellyfinReferences.set(episode.id,sources[0].url);}
+    return episodes;
+  }
+
+  function sourceHomeRows() {
+    return { archive: archiveRows, jellyfin: jellyfinRows };
+  }
+
+  /* ---------------- Dónde verla legalmente (TMDB/JustWatch) ---------------- */
+  function regionFromLang() {
+    const l = (Store.settings.language || 'es-MX').toLowerCase();
+    if (l.includes('es-es')) return 'ES';
+    if (l.startsWith('en')) return 'US';
+    return 'AR'; // catálogo rioplatense por defecto
+  }
+
+  async function watchProviders(type, id) {
+    const region = regionFromLang();
+    const d = await cached(`wp:${type}:${id}`, TTL.detail, () => tmdb(`/${type}/${id}/watch/providers`));
+    const r = d && d.results && d.results[region];
+    if (!r) return { region, groups: [], link: null };
+    const groups = [
+      ['Suscripción', r.flatrate || []],
+      ['Renta', r.rent || []],
+      ['Compra', r.buy || []],
+    ].filter(([, arr]) => arr.length);
+    return { region, groups, link: r.link };
+  }
+
+  /* ---------------- Plataformas & Anime (paridad TV) ---------------- */
+  const WATCH_PLATFORMS = (typeof MoviePlusCore !== 'undefined' && MoviePlusCore.STREAMING_PLATFORMS) || [
+    { id: 'netflix', name: 'Netflix', color: '#e50914', aliases: ['netflix', 'netflix standard with ads', 'netflix basic with ads'], providerIds: [8, 1796] },
+    { id: 'hbo', name: 'HBO Max', color: '#6b38ff', aliases: ['max', 'hbo max', 'hbo max with ads', 'max with ads'], providerIds: [1899, 384] },
+    { id: 'prime', name: 'Prime Video', color: '#00a8e1', aliases: ['amazon prime video', 'amazon prime video with ads', 'prime video'], providerIds: [119, 9] },
+    { id: 'apple', name: 'Apple TV+', color: '#d8dbe2', aliases: ['apple tv plus', 'apple tv+', 'apple tv'], providerIds: [350] },
+    { id: 'disney', name: 'Disney+', color: '#113ccf', aliases: ['disney plus', 'disney+', 'disney plus with ads'], providerIds: [337] },
+    { id: 'paramount', name: 'Paramount+', color: '#0064ff', aliases: ['paramount plus', 'paramount+', 'paramount plus premium', 'paramount plus basic with ads'], providerIds: [531, 1853] },
+    { id: 'crunchyroll', name: 'Crunchyroll', color: '#f47521', aliases: ['crunchyroll'], providerIds: [283] },
+    { id: 'mubi', name: 'MUBI', color: '#2b59ff', aliases: ['mubi'], providerIds: [11] },
+  ];
+
+  async function platformProviderIds(platform, region) {
+    const cleanRegion = String(region || regionFromLang()).toUpperCase();
+    const list = await cached(`wp-prov:${cleanRegion}`, 24 * 60 * 60 * 1000, async () => {
+      const [mv, tv] = await Promise.allSettled([
+        tmdb('/watch/providers/movie', { watch_region: cleanRegion }),
+        tmdb('/watch/providers/tv', { watch_region: cleanRegion }),
+      ]);
+      const all = [];
+      for (const batch of [mv, tv]) {
+        if (batch.status === 'fulfilled' && Array.isArray(batch.value?.results)) all.push(...batch.value.results);
+      }
+      return all;
+    }).catch(() => []);
+    if (typeof MoviePlusCore !== 'undefined' && MoviePlusCore.matchWatchProviderIds) {
+      return MoviePlusCore.matchWatchProviderIds(platform, list);
+    }
+    return [...(platform.providerIds || [])];
+  }
+
+  async function discoverPlatform(platformId, regionInput, page = 1, typeFilter = 'all') {
+    const platform = WATCH_PLATFORMS.find((p) => p.id === platformId) || WATCH_PLATFORMS[0];
+    const region = /^[A-Z]{2}$/.test(String(regionInput || '').toUpperCase())
+      ? String(regionInput).toUpperCase() : regionFromLang();
+    if (!token()) return { platform, region, page, hasMore: false, items: [], missingToken: true };
+    const key = `platform:${platform.id}:${region}:${typeFilter}:${page}`;
+    return cached(key, TTL.list, async () => {
+      const ids = await platformProviderIds(platform, region);
+      if (!ids.length) return { platform, region, page, hasMore: false, items: [], unavailableInRegion: true };
+      const types = typeFilter === 'movie' ? ['movie'] : typeFilter === 'tv' ? ['tv'] : ['movie', 'tv'];
+      const responses = await Promise.allSettled(types.map((mediaType) => tmdb(`/discover/${mediaType}`, {
+        with_watch_providers: ids.join('|'),
+        watch_region: region,
+        with_watch_monetization_types: 'flatrate',
+        sort_by: 'popularity.desc',
+        include_adult: 'false',
+        page: String(page),
+      }).then((d) => ({ mediaType, d }))));
+      const buckets = [];
+      let hasMore = false;
+      for (const res of responses) {
+        if (res.status !== 'fulfilled' || !res.value?.d) continue;
+        const { mediaType, d } = res.value;
+        if ((d.total_pages || 0) > page) hasMore = true;
+        buckets.push((d.results || []).map((row) => normalize({ ...row, media_type: mediaType })).filter(Boolean));
+      }
+      const interleaved = [];
+      const maxLen = Math.max(0, ...buckets.map((b) => b.length));
+      for (let i = 0; i < maxLen; i++) {
+        for (const bucket of buckets) {
+          if (bucket[i]) {
+            const cat = findCatalogItem(bucket[i].type, bucket[i].id, bucket[i]);
+            interleaved.push(cat ? { ...bucket[i], ...cat, poster: bucket[i].poster || cat.poster, backdrop: bucket[i].backdrop || cat.backdrop } : bucket[i]);
+          }
+        }
+      }
+      return { platform, region, page, hasMore, items: interleaved };
+    });
+  }
+
+  async function animeHomeRow() {
+    if (!token()) return [];
+    return cached('home:anime:tmdb', TTL.list, async () => {
+      const [tvRes, mvRes] = await Promise.allSettled([
+        tmdb('/discover/tv', { with_genres: '16', with_original_language: 'ja', sort_by: 'popularity.desc', page: '1' }),
+        tmdb('/discover/movie', { with_genres: '16', with_original_language: 'ja', sort_by: 'popularity.desc', page: '1' }),
+      ]);
+      const items = [];
+      for (const [mediaType, res] of [['tv', tvRes], ['movie', mvRes]]) {
+        if (res.status !== 'fulfilled' || !res.value?.results) continue;
+        for (const row of res.value.results) {
+          const norm = normalize({ ...row, media_type: mediaType });
+          if (norm) items.push({ ...norm, catalogType: 3 });
+        }
+      }
+      return items.slice(0, 24);
+    }).catch(() => []);
+  }
+
+  async function nebulaFallbackRows() {
+    if (!Platform.nebulaCall) return [];
+    return cached('nebula:fallback:rows', TTL.list, async () => {
+      const categories = await providerCall('categories', { kind: 'vod' }).catch(() => []);
+      const picked = (Array.isArray(categories) ? categories : []).filter((c) => c?.id).slice(0, 4);
+      const movies = [], series = [];
+      await Promise.allSettled(picked.map(async (cat) => {
+        const res = await providerCall('catalog', { kind: 'vod', category: cat.id, page: 1 });
+        for (const raw of (res?.items || [])) {
+          const mapped = nebulaItem(raw);
+          if (mapped.type === 'tv') series.push(mapped);
+          else movies.push(mapped);
+        }
+      }));
+      const out = [];
+      if (movies.length) out.push({ title: 'Películas · Respaldo disponible', items: movies.slice(0, 20) });
+      if (series.length) out.push({ title: 'Series · Respaldo disponible', items: series.slice(0, 20) });
+      return out;
+    }).catch(() => []);
+  }
+
+  /** URL de reproducción de un elemento de Jellyfin por su ID */
+  function jellyfinPrivateStreamUrl(itemId) {
+    const jf = jellyfinBase();
+    if (!jf) throw new Error('Jellyfin no configurado');
+    return jellyfinStream(jf.base, jf.key, itemId);
+  }
+  function jellyfinStreamUrl(itemId){return Platform.registerSources?jellyfinReferences.get(itemId)||'':jellyfinPrivateStreamUrl(itemId);}
+
+  return {
+    homeRows, genres, byGenre, movieDetail, ratingFor, seriesDetail, detailDiscovery, seasonEpisodes, search, personTitles, nebulaDetail, nebulaRows, nebulaFallbackRows, loadXuperBrowse: xuperBrowseCatalog, xuperPremieres, movieSources, sourcesFor, episodesFor, sourceCapabilities:providerCatalog.capabilities,
+    poster, backdrop, loadCatalogs, findCatalogItem, cachedCatalogItem, catalogHomeRows, regionFromLang, discoverPlatform, animeHomeRow, WATCH_PLATFORMS,
+    SEARCH_DEBOUNCE_MS, SEARCH_MIN_CHARS,
+    parseSources: CatalogSources.parse,
+    catalogEpisodes,
+    invalidate: () => {
+      cache.clear();
+      catalogsCache.clear();
+      invalidateCatalogIndex();
+    },
+    /* fuentes */
+    archiveRows, archiveSearch, archiveDetail,
+    jellyfinRows, jellyfinSearch, jellyfinDetail, jellyfinEpisodes, jellyfinBase, jellyfinStreamUrl,
+    watchProviders,
+  };
+})();
