@@ -1,0 +1,38 @@
+'use strict';
+const PlaybackTracks = (() => {
+  const names = { spa: 'Español', es: 'Español', eng: 'Inglés', en: 'Inglés', kor: 'Coreano', ko: 'Coreano', jpn: 'Japonés', ja: 'Japonés', por: 'Portugués', pt: 'Portugués', fra: 'Francés', fre: 'Francés', fr: 'Francés', ita: 'Italiano', it: 'Italiano', deu: 'Alemán', ger: 'Alemán', de: 'Alemán', und: '' };
+  function language(code) { return names[String(code || '').toLowerCase()] || code || ''; }
+  function key(code) { const value = String(code || '').toLowerCase().split('-')[0]; return ({ spa: 'es', eng: 'en', kor: 'ko', jpn: 'ja', por: 'pt', fra: 'fr', fre: 'fr', ita: 'it', deu: 'de', ger: 'de' })[value] || value; }
+  const label=(name,code,index)=>name&&!/^(?:soundhandler|audiohandler|audio|default|und)$/i.test(name)?name:language(code)||`Pista ${index+1}`;
+  function audio(video, hls) {
+    if (hls?.audioTracks?.length) return hls.audioTracks.map((track, index) => ({ index, name: track.name || language(track.lang) || `Pista ${index + 1}`, language: track.lang || '', selected: hls.audioTrack === index }));
+    return Array.from(video.audioTracks || []).map((track, index) => ({ index, name: label(track.label,track.language,index), language: track.language || '', selected: track.enabled }));
+  }
+  function select(video, hls, index) {
+    const tracks = audio(video, hls);
+    if (!tracks.some(track => track.index === index)) throw new Error('Pista de audio no disponible');
+    if (hls?.audioTracks?.length) hls.audioTrack = index;
+    else Array.from(video.audioTracks || []).forEach((track, i) => { track.enabled = i === index; });
+  }
+  // Source names are free text such as «60fps 1080p LAT CAST SUB». Splits them into the resolution, the tags
+  // (HDR, 5.1, 60fps…), the languages and whatever is left, for the source cards and the quality panel.
+  // Providers also write the language in full («1080p · Español», «720p · Francés»).
+  const sourceLanguages = { LAT: 'Español latino', LATINO: 'Español latino', CAST: 'Español (España)', CASTELLANO: 'Español (España)', ESP: 'Español', SPA: 'Español', 'ESPAÑOL': 'Español', ESPANOL: 'Español', SPANISH: 'Español', ENG: 'Inglés', EN: 'Inglés', ING: 'Inglés', 'INGLÉS': 'Inglés', INGLES: 'Inglés', ENGLISH: 'Inglés', 'FRANCÉS': 'Francés', FRANCES: 'Francés', FRENCH: 'Francés', FRA: 'Francés', 'PORTUGUÉS': 'Portugués', PORTUGUES: 'Portugués', ITALIANO: 'Italiano', 'ALEMÁN': 'Alemán', ALEMAN: 'Alemán', COREANO: 'Coreano', SUB: 'Subtítulos', SUBS: 'Subtítulos', SUBTITULADO: 'Subtítulos', VOSE: 'Subtítulos', DUAL: 'Audio dual', DUALC: 'Audio dual', JAP: 'Japonés', JPN: 'Japonés', 'JAPONÉS': 'Japonés', JAPONES: 'Japonés' };
+  function sourceParts(name) {
+    let resolution = '';
+    const tags = [], languages = [], rest = [];
+    for (const token of String(name || '').split(/[\s_|,·•]+/).filter(token => token && !/^[-–—]+$/.test(token))) {
+      const upper = token.toUpperCase();
+      if (!resolution && /^(?:2160P?|4K|UHD)$/.test(upper)) resolution = '4K';
+      else if (!resolution && /^\d{3,4}P$/.test(upper)) resolution = upper.toLowerCase();
+      else if (/^(?:HDR10\+?|HDR|SDR|DV|DOLBY|ATMOS|HEVC|X265|H265|AV1|REMUX|5\.1|7\.1|\d{2}FPS)$/.test(upper)) tags.push(/FPS$/.test(upper) ? upper.toLowerCase() : upper);
+      else if (sourceLanguages[upper]) { if (!languages.includes(sourceLanguages[upper])) languages.push(sourceLanguages[upper]); }
+      else rest.push(token);
+    }
+    // «Español latino» or «Español (España)» already say «Español».
+    const specific = languages.some(value => value !== 'Español' && value.startsWith('Español'));
+    return { resolution, tags, languages: specific ? languages.filter(value => value !== 'Español') : languages, rest: rest.join(' ') };
+  }
+  return { language, key, audio, select, sourceParts };
+})();
+if (typeof module !== 'undefined') module.exports = PlaybackTracks;
