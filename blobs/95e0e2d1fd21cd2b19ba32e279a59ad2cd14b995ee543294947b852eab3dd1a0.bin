@@ -1,0 +1,1308 @@
+'use strict';
+const NebulaAccount = (() => {
+  const DEFAULT_API_BASE = 'https://nebula.ortiz-jonathan.workers.dev';
+  const STORAGE_KEY = 'nebula_account_v1';
+  const DEVICE_UID_KEY = 'nebula_device_uid_v1';
+  const REFRESH_TTL_MS = 3 * 60 * 1000;
+  const PERIODIC_REFRESH_MS = 30 * 60 * 1000;
+  const REQUEST_TIMEOUT_MS = 10000;
+
+  let memoryFallback = null;
+  let deviceUidFallback = '';
+  let nativeDeviceUid = '';
+  let runtimeInfoPromise = null;
+  let started = false;
+  let refreshPromise = null;
+  let cachedAppVersion = '';
+
+  function loadRuntimeInfo() {
+    if (runtimeInfoPromise) return runtimeInfoPromise;
+    if (typeof Platform === 'undefined' || typeof Platform.runtimeInfo !== 'function') {
+      runtimeInfoPromise = Promise.resolve(null);
+      return runtimeInfoPromise;
+    }
+    runtimeInfoPromise = Promise.resolve()
+      .then(() => Platform.runtimeInfo())
+      .then((info) => {
+        if (info?.version) cachedAppVersion = String(info.version);
+        const uid = String(info?.deviceUid || '').trim();
+        if (/^[a-zA-Z0-9_-]{16,128}$/.test(uid)) {
+          nativeDeviceUid = uid;
+        }
+        return info || null;
+      })
+      .catch(() => null);
+    return runtimeInfoPromise;
+  }
+
+  function getOrCreateDeviceUid() {
+    if (/^[a-zA-Z0-9_-]{16,128}$/.test(nativeDeviceUid)) return nativeDeviceUid;
+    let existing = '';
+    try {
+      existing = String(globalThis.localStorage?.getItem?.(DEVICE_UID_KEY) || '').trim();
+    } catch {}
+    if (/^[a-zA-Z0-9_-]{16,128}$/.test(existing)) {
+      deviceUidFallback = existing;
+      return existing;
+    }
+    if (/^[a-zA-Z0-9_-]{16,128}$/.test(deviceUidFallback)) return deviceUidFallback;
+
+    let generated = '';
+    try {
+      const cryptoObj = globalThis.crypto;
+      if (typeof cryptoObj?.randomUUID === 'function') {
+        generated = `app_${cryptoObj.randomUUID().replace(/-/g, '')}`;
+      } else if (typeof cryptoObj?.getRandomValues === 'function') {
+        const bytes = new Uint8Array(16);
+        cryptoObj.getRandomValues(bytes);
+        generated = `app_${Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')}`;
+      }
+    } catch {}
+    if (!generated || generated.length < 16) {
+      generated = `app_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 14)}`;
+    }
+    deviceUidFallback = generated;
+    try {
+      globalThis.localStorage?.setItem?.(DEVICE_UID_KEY, generated);
+    } catch {}
+    return generated;
+  }
+
+  async function getOrCreateDeviceUidAsync() {
+    if (!nativeDeviceUid) {
+      await loadRuntimeInfo();
+    }
+    return getOrCreateDeviceUid();
+  }
+
+  function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, (ch) => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;',
+    }[ch]));
+  }
+
+  function apiBase() {
+    const raw = typeof Store !== 'undefined' ? String(Store?.settings?.accountApiUrl || '').trim() : '';
+    if (/^(?:https:\/\/|http:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?(?:\/|$))/i.test(raw)) {
+      return raw.replace(/\/+$/, '');
+    }
+    return DEFAULT_API_BASE;
+  }
+
+  function plansUrl() {
+    return `${apiBase()}/suscripcion?buy=1`;
+  }
+
+  function tvUrl() {
+    return `${apiBase()}/tv`;
+  }
+
+  function normalizeAccess(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const expiresAt = Number(raw.expiresAt);
+    return {
+      hasAccess: Boolean(raw.hasAccess),
+      state: String(raw.state || 'none'),
+      expiresAt: Number.isFinite(expiresAt) && expiresAt > 0 ? expiresAt : null,
+      daysRemaining: Math.max(0, Number(raw.daysRemaining) || 0),
+      trialUsed: Boolean(raw.trialUsed),
+      planId: raw.planId ? String(raw.planId) : null,
+    };
+  }
+
+  function emptyState() {
+    return { token: '', email: '', country: '', access: null, lastCheckedAt: 0 };
+  }
+
+  function readState() {
+    let raw = null;
+    try {
+      raw = globalThis.localStorage?.getItem?.(STORAGE_KEY) ?? memoryFallback;
+    } catch {
+      raw = memoryFallback;
+    }
+    if (!raw) return emptyState();
+    try {
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object') return emptyState();
+      return {
+        token: typeof parsed.token === 'string' ? parsed.token : '',
+        email: typeof parsed.email === 'string' ? parsed.email : '',
+        country: typeof parsed.country === 'string' ? parsed.country : '',
+        access: normalizeAccess(parsed.access),
+        lastCheckedAt: Number(parsed.lastCheckedAt) || 0,
+      };
+    } catch {
+      return emptyState();
+    }
+  }
+
+  function writeState(next) {
+    const clean = {
+      token: typeof next?.token === 'string' ? next.token : '',
+      email: typeof next?.email === 'string' ? next.email : '',
+      country: typeof next?.country === 'string' ? next.country : '',
+      access: normalizeAccess(next?.access),
+      lastCheckedAt: Number(next?.lastCheckedAt) || 0,
+    };
+    const serialized = JSON.stringify(clean);
+    memoryFallback = serialized;
+    try {
+      globalThis.localStorage?.setItem?.(STORAGE_KEY, serialized);
+    } catch {}
+    return clean;
+  }
+
+  function clearState() {
+    memoryFallback = null;
+    try {
+      globalThis.localStorage?.removeItem?.(STORAGE_KEY);
+    } catch {}
+  }
+
+  function getState() {
+    return readState();
+  }
+
+  function hasAccess(now = Date.now()) {
+    const state = readState();
+    if (!state.token || !state.access?.hasAccess) return false;
+    if (state.access.expiresAt !== null && state.access.expiresAt <= now) return false;
+    return true;
+  }
+
+  function daysRemaining(now = Date.now()) {
+    const state = readState();
+    if (!state.token || !state.access) return 0;
+    if (state.access.expiresAt !== null) {
+      if (state.access.expiresAt <= now) return 0;
+      return Math.max(1, Math.ceil((state.access.expiresAt - now) / 86400000));
+    }
+    return state.access.hasAccess ? Math.max(0, state.access.daysRemaining || 0) : 0;
+  }
+
+  function isTvMode() {
+    if (typeof Platform !== 'undefined' && Platform.isTizen) return true;
+    return typeof document !== 'undefined' && Boolean(document.body?.classList?.contains?.('platform-tv'));
+  }
+
+  function detectPlatform() {
+    if (typeof Platform !== 'undefined' && Platform.isTizen) return 'tizen';
+    const isTvClass = typeof document !== 'undefined' && Boolean(document.body?.classList?.contains?.('platform-tv'));
+    if (isTvClass) return 'android-tv';
+    if (typeof Platform !== 'undefined' && Platform.isAndroid) return 'android-phone';
+    if (typeof Platform !== 'undefined' && Platform.isMac) return 'macos';
+    if (typeof Platform !== 'undefined' && Platform.isIos) return 'web';
+    return 'windows';
+  }
+
+  function detectDeviceName() {
+    const platform = detectPlatform();
+    if (platform === 'tizen') return 'Samsung Smart TV';
+    if (platform === 'android-tv') return 'Android TV';
+    if (platform === 'android-phone') return 'Celular Android';
+    if (platform === 'macos') return 'Mac';
+    if (platform === 'web' && typeof Platform !== 'undefined' && Platform.isIos) return 'iPhone / iPad';
+    return 'PC Windows';
+  }
+
+  function resolveAppVersion() {
+    if (cachedAppVersion) return cachedAppVersion;
+    const labelText = typeof document !== 'undefined'
+      ? String(document.getElementById?.('appVersionLabel')?.textContent || '').replace(/^v\s*/i, '').trim()
+      : '';
+    return labelText || 'app';
+  }
+
+  function openExternalUrl(url) {
+    const href = String(url || '').trim();
+    if (!href) return Promise.resolve(false);
+    try {
+      if (typeof Platform !== 'undefined') {
+        if (typeof Platform.openExternal === 'function') return Promise.resolve(Platform.openExternal(href));
+        if (typeof Platform.openUrl === 'function') return Promise.resolve(Platform.openUrl(href));
+      }
+      globalThis.open?.(href, '_blank', 'noopener');
+      return Promise.resolve(true);
+    } catch {
+      return Promise.resolve(false);
+    }
+  }
+
+  function notify(message) {
+    if (typeof App !== 'undefined' && typeof App.toast === 'function') App.toast(message);
+  }
+
+  async function requestJson(path, options = {}) {
+    if (typeof fetch !== 'function') {
+      throw Object.assign(Error('Red no disponible en este entorno.'), { isNetwork: true });
+    }
+    const { method = 'GET', body = null, token = '' } = options;
+    const headers = {};
+    if (body !== null) headers['Content-Type'] = 'application/json';
+    if (token) headers.Authorization = `Bearer ${token}`;
+
+    const controller = typeof AbortController === 'function' ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS) : null;
+    try {
+      const response = await fetch(`${apiBase()}${path}`, {
+        method,
+        headers,
+        body: body !== null ? JSON.stringify(body) : undefined,
+        signal: controller?.signal,
+      });
+      const text = await response.text().catch(() => '');
+      let data = {};
+      try {
+        data = text ? JSON.parse(text) : {};
+      } catch {
+        data = {};
+      }
+      return { ok: response.ok, status: response.status, data };
+    } catch (error) {
+      throw Object.assign(Error(error?.message || 'Sin conexión'), { isNetwork: true, cause: error });
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+    }
+  }
+
+  async function requestOtp(email) {
+    const cleanEmail = String(email || '').trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      return { ok: false, error: 'Ingresá un correo electrónico válido.' };
+    }
+    try {
+      const res = await requestJson('/api/auth/otp', {
+        method: 'POST',
+        body: { email: cleanEmail },
+      });
+      if (!res.ok || res.data?.ok === false) {
+        return {
+          ok: false,
+          error: res.data?.error || 'No se pudo enviar el código. Intentá nuevamente.',
+        };
+      }
+      return {
+        ok: true,
+        email: cleanEmail,
+        expiresInSeconds: Number(res.data?.expiresInSeconds) || 600,
+      };
+    } catch {
+      return { ok: false, offline: true, error: 'No pudimos conectarnos. Revisá tu conexión a Internet.' };
+    }
+  }
+
+  async function verifyOtp(email, code) {
+    const cleanEmail = String(email || '').trim().toLowerCase();
+    const cleanCode = String(code || '').replace(/\D/g, '');
+    if (!/^\d{6}$/.test(cleanCode)) {
+      return { ok: false, error: 'Ingresá el código de 6 dígitos que llegó a tu correo.' };
+    }
+    try {
+      const deviceUid = await getOrCreateDeviceUidAsync();
+      const res = await requestJson('/api/auth/verify', {
+        method: 'POST',
+        body: {
+          email: cleanEmail,
+          code: cleanCode,
+          deviceName: detectDeviceName(),
+          deviceUid,
+          platform: detectPlatform(),
+          appVersion: resolveAppVersion(),
+        },
+      });
+      if (!res.ok || !res.data?.ok || !res.data?.token) {
+        return {
+          ok: false,
+          error: res.data?.error || 'Código inválido o vencido. Verificá los 6 números.',
+        };
+      }
+      const access = normalizeAccess(res.data.access);
+      const next = writeState({
+        token: res.data.token,
+        email: res.data.user?.email || cleanEmail,
+        country: res.data.user?.country || '',
+        access,
+        lastCheckedAt: Date.now(),
+      });
+      refreshUi();
+      return {
+        ok: true,
+        user: res.data.user || { email: next.email, country: next.country },
+        token: next.token,
+        trialGranted: Boolean(res.data.trialGranted),
+        trialBlockedReason: res.data.trialBlockedReason || null,
+        access,
+        deviceLimitReached: Boolean(res.data.deviceLimitReached),
+      };
+    } catch {
+      return { ok: false, offline: true, error: 'Sin conexión para verificar el código.' };
+    }
+  }
+
+  async function requestTvPair() {
+    try {
+      const deviceUid = await getOrCreateDeviceUidAsync();
+      const res = await requestJson('/api/tv/pair', {
+        method: 'POST',
+        body: {
+          deviceName: detectDeviceName(),
+          deviceUid,
+          platform: detectPlatform(),
+        },
+      });
+      if (!res.ok || !res.data?.ok || !res.data?.code) {
+        return {
+          ok: false,
+          error: res.data?.error || 'No se pudo generar el código de vinculación.',
+        };
+      }
+      return {
+        ok: true,
+        code: String(res.data.code),
+        formattedCode: String(res.data.formattedCode || res.data.code),
+        qrUrl: String(res.data.qrUrl || `${apiBase()}/tv?code=${encodeURIComponent(String(res.data.code))}`),
+        expiresAt: Number(res.data.expiresAt) || 0,
+      };
+    } catch {
+      return { ok: false, offline: true, error: 'Sin conexión para generar el código de TV.' };
+    }
+  }
+
+  async function pollTvPairStatus(code) {
+    const cleanCode = String(code || '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+    if (!cleanCode) return { ok: false, status: 'invalid' };
+    try {
+      const res = await requestJson(`/api/tv/pair/status?code=${encodeURIComponent(cleanCode)}`);
+      if (res.status === 404) return { ok: true, status: 'expired' };
+      if (!res.ok || !res.data?.ok) {
+        return { ok: false, error: res.data?.error || 'No se pudo consultar la vinculación.' };
+      }
+      const status = String(res.data.status || 'pending');
+      if (status === 'authorized' && res.data.token) {
+        const access = normalizeAccess(res.data.access);
+        const next = writeState({
+          token: String(res.data.token),
+          email: String(res.data.accountEmail || ''),
+          country: '',
+          access,
+          lastCheckedAt: Date.now(),
+        });
+        refreshUi();
+        return { ok: true, status: 'authorized', email: next.email, access: next.access };
+      }
+      return { ok: true, status };
+    } catch {
+      return { ok: false, offline: true };
+    }
+  }
+
+  // ISO/IEC 18004 Byte-mode QR encoder (Versions 1..8, ECC Level M) for offline SVG rendering on TVs.
+  const QR_M_SPECS = [
+    [1, 26, 10, 1, 16, 0, 0, []],
+    [2, 44, 16, 1, 28, 0, 0, [6, 18]],
+    [3, 70, 26, 1, 44, 0, 0, [6, 22]],
+    [4, 100, 18, 2, 32, 0, 0, [6, 26]],
+    [5, 134, 24, 2, 43, 0, 0, [6, 30]],
+    [6, 172, 16, 4, 27, 0, 0, [6, 34]],
+    [7, 196, 18, 4, 31, 0, 0, [6, 22, 38]],
+    [8, 242, 22, 2, 38, 2, 39, [6, 24, 42]],
+  ];
+
+  function qrUtf8Bytes(text) {
+    const str = String(text || '');
+    if (typeof TextEncoder === 'function') return Array.from(new TextEncoder().encode(str));
+    const encoded = unescape(encodeURIComponent(str));
+    const out = [];
+    for (let i = 0; i < encoded.length; i++) out.push(encoded.charCodeAt(i) & 0xff);
+    return out;
+  }
+
+  function qrGfMul(a, b) {
+    let x = a;
+    let y = b;
+    let res = 0;
+    while (y > 0) {
+      if (y & 1) res ^= x;
+      x <<= 1;
+      if (x & 0x100) x ^= 0x11d;
+      y >>>= 1;
+    }
+    return res;
+  }
+
+  function qrRsRemainder(data, ecLen) {
+    const gen = new Array(ecLen).fill(0);
+    gen[ecLen - 1] = 1;
+    let root = 1;
+    for (let i = 0; i < ecLen; i++) {
+      for (let j = 0; j < ecLen; j++) {
+        gen[j] = qrGfMul(gen[j], root);
+        if (j + 1 < ecLen) gen[j] ^= gen[j + 1];
+      }
+      root = qrGfMul(root, 2);
+    }
+    const rem = new Array(ecLen).fill(0);
+    for (let i = 0; i < data.length; i++) {
+      const factor = (data[i] & 0xff) ^ rem[0];
+      for (let k = 0; k < ecLen - 1; k++) rem[k] = rem[k + 1];
+      rem[ecLen - 1] = 0;
+      for (let j = 0; j < ecLen; j++) rem[j] ^= qrGfMul(gen[j], factor);
+    }
+    return rem;
+  }
+
+  function encodeQrMatrix(text) {
+    const payload = qrUtf8Bytes(text);
+    const spec = QR_M_SPECS.find((s) => payload.length <= Math.floor(((s[3] * s[4] + s[5] * s[6]) * 8 - 12) / 8));
+    if (!spec) return null;
+    const [version, totalCw, ecPerBlock, blocksG1, dataG1, blocksG2, dataG2, centers] = spec;
+    const dataCwCount = blocksG1 * dataG1 + blocksG2 * dataG2;
+    const capBits = dataCwCount * 8;
+    const bits = new Uint8Array(capBits);
+    let pos = 0;
+    const writeBits = (val, len) => {
+      for (let shift = len - 1; shift >= 0; shift--) bits[pos++] = (val >>> shift) & 1;
+    };
+    writeBits(0b0100, 4);
+    writeBits(payload.length, 8);
+    for (let i = 0; i < payload.length; i++) writeBits(payload[i] & 0xff, 8);
+    pos += Math.min(4, capBits - pos);
+    while (pos % 8 !== 0) pos++;
+    for (let pad = 0; pos < capBits; pad++) writeBits(pad % 2 === 0 ? 0xec : 0x11, 8);
+
+    const dataCw = new Uint8Array(dataCwCount);
+    for (let cw = 0; cw < dataCwCount; cw++) {
+      let v = 0;
+      for (let b = 0; b < 8; b++) v = (v << 1) | bits[cw * 8 + b];
+      dataCw[cw] = v;
+    }
+
+    const totalBlocks = blocksG1 + blocksG2;
+    const blocks = [];
+    const eccs = [];
+    let offset = 0;
+    for (let i = 0; i < totalBlocks; i++) {
+      const len = i < blocksG1 ? dataG1 : dataG2;
+      const blk = dataCw.slice(offset, offset + len);
+      blocks.push(blk);
+      eccs.push(qrRsRemainder(blk, ecPerBlock));
+      offset += len;
+    }
+    const maxData = Math.max(dataG1, dataG2);
+    const codewords = new Uint8Array(totalCw);
+    let outPos = 0;
+    for (let i = 0; i < maxData; i++) {
+      for (let b = 0; b < blocks.length; b++) if (i < blocks[b].length) codewords[outPos++] = blocks[b][i];
+    }
+    for (let i = 0; i < ecPerBlock; i++) {
+      for (let b = 0; b < eccs.length; b++) codewords[outPos++] = eccs[b][i];
+    }
+
+    const size = version * 4 + 17;
+    const modules = new Uint8Array(size * size);
+    const isFunc = new Uint8Array(size * size);
+    const setFunc = (x, y, dark) => {
+      const idx = y * size + x;
+      modules[idx] = dark ? 1 : 0;
+      isFunc[idx] = 1;
+    };
+    const drawFormat = (mask) => {
+      const data = mask;
+      let rem = data;
+      for (let i = 0; i < 10; i++) rem = (rem << 1) ^ ((rem >>> 9) * 0x537);
+      const fbits = ((data << 10) | rem) ^ 0x5412;
+      for (let i = 0; i <= 5; i++) setFunc(8, i, (fbits >>> i) & 1);
+      setFunc(8, 7, (fbits >>> 6) & 1);
+      setFunc(8, 8, (fbits >>> 7) & 1);
+      setFunc(7, 8, (fbits >>> 8) & 1);
+      for (let i = 9; i < 15; i++) setFunc(14 - i, 8, (fbits >>> i) & 1);
+      for (let i = 0; i < 8; i++) setFunc(size - 1 - i, 8, (fbits >>> i) & 1);
+      for (let i = 8; i < 15; i++) setFunc(8, size - 15 + i, (fbits >>> i) & 1);
+      setFunc(8, size - 8, 1);
+    };
+
+    for (let i = 0; i < size; i++) {
+      const d = i % 2 === 0 ? 1 : 0;
+      setFunc(6, i, d);
+      setFunc(i, 6, d);
+    }
+    const drawFinder = (fx, fy) => {
+      for (let dy = -1; dy <= 7; dy++) {
+        for (let dx = -1; dx <= 7; dx++) {
+          const x = fx + dx;
+          const y = fy + dy;
+          if (x < 0 || x >= size || y < 0 || y >= size) continue;
+          const dist = Math.max(Math.abs(dx - 3), Math.abs(dy - 3));
+          setFunc(x, y, dist !== 2 && dist !== 4);
+        }
+      }
+    };
+    drawFinder(0, 0);
+    drawFinder(size - 7, 0);
+    drawFinder(0, size - 7);
+    for (let cy of centers) {
+      for (let cx of centers) {
+        if ((cx <= 8 && cy <= 8) || (cx >= size - 9 && cy <= 8) || (cx <= 8 && cy >= size - 9)) continue;
+        for (let dy = -2; dy <= 2; dy++) {
+          for (let dx = -2; dx <= 2; dx++) setFunc(cx + dx, cy + dy, Math.max(Math.abs(dx), Math.abs(dy)) !== 1);
+        }
+      }
+    }
+    drawFormat(0);
+    if (version >= 7) {
+      let rem = version;
+      for (let i = 0; i < 12; i++) rem = (rem << 1) ^ ((rem >>> 11) * 0x1f25);
+      const vbits = (version << 12) | rem;
+      for (let i = 0; i < 18; i++) {
+        const d = (vbits >>> i) & 1;
+        setFunc(size - 11 + (i % 3), Math.floor(i / 3), d);
+        setFunc(Math.floor(i / 3), size - 11 + (i % 3), d);
+      }
+    }
+
+    let bitIndex = 0;
+    const totalBits = codewords.length * 8;
+    for (let right = size - 1; right >= 1; right -= 2) {
+      if (right === 6) right = 5;
+      const upward = ((right + 1) & 2) === 0;
+      for (let vert = 0; vert < size; vert++) {
+        const y = upward ? size - 1 - vert : vert;
+        for (let j = 0; j <= 1; j++) {
+          const idx = y * size + (right - j);
+          if (!isFunc[idx]) {
+            modules[idx] = bitIndex < totalBits ? ((codewords[bitIndex >>> 3] >>> (7 - (bitIndex & 7))) & 1) : 0;
+            bitIndex++;
+          }
+        }
+      }
+    }
+
+    const applyMask = (mask) => {
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          const idx = y * size + x;
+          if (isFunc[idx]) continue;
+          let inv = false;
+          if (mask === 0) inv = (x + y) % 2 === 0;
+          else if (mask === 1) inv = y % 2 === 0;
+          else if (mask === 2) inv = x % 3 === 0;
+          else if (mask === 3) inv = (x + y) % 3 === 0;
+          else if (mask === 4) inv = (Math.floor(x / 3) + Math.floor(y / 2)) % 2 === 0;
+          else if (mask === 5) inv = ((x * y) % 2) + ((x * y) % 3) === 0;
+          else if (mask === 6) inv = (((x * y) % 2) + ((x * y) % 3)) % 2 === 0;
+          else inv = (((x + y) % 2) + ((x * y) % 3)) % 2 === 0;
+          if (inv) modules[idx] ^= 1;
+        }
+      }
+    };
+
+    const finderPenalty = (h) => {
+      const n = h[1];
+      const core = n > 0 && h[2] === n && h[3] === n * 3 && h[4] === n && h[5] === n;
+      return core && ((h[0] >= n * 4 && h[6] >= n) || (h[6] >= n * 4 && h[0] >= n)) ? 1 : 0;
+    };
+    const pushHist = (h, len) => {
+      for (let k = 6; k >= 1; k--) h[k] = h[k - 1];
+      h[0] = len;
+    };
+    const penaltyScore = () => {
+      let score = 0;
+      for (let y = 0; y < size; y++) {
+        let rc = 0;
+        let rl = 0;
+        const h = [0, 0, 0, 0, 0, 0, 0];
+        for (let x = 0; x < size; x++) {
+          const d = modules[y * size + x];
+          if (d === rc) {
+            rl++;
+            if (rl === 5) score += 3;
+            else if (rl > 5) score++;
+          } else {
+            pushHist(h, rl);
+            if (!d) score += finderPenalty(h) * 40;
+            rc = d;
+            rl = 1;
+          }
+        }
+        pushHist(h, rl);
+        if (rc) pushHist(h, 0);
+        score += finderPenalty(h) * 40;
+      }
+      for (let x = 0; x < size; x++) {
+        let rc = 0;
+        let rl = 0;
+        const h = [0, 0, 0, 0, 0, 0, 0];
+        for (let y = 0; y < size; y++) {
+          const d = modules[y * size + x];
+          if (d === rc) {
+            rl++;
+            if (rl === 5) score += 3;
+            else if (rl > 5) score++;
+          } else {
+            pushHist(h, rl);
+            if (!d) score += finderPenalty(h) * 40;
+            rc = d;
+            rl = 1;
+          }
+        }
+        pushHist(h, rl);
+        if (rc) pushHist(h, 0);
+        score += finderPenalty(h) * 40;
+      }
+      for (let y = 0; y < size - 1; y++) {
+        for (let x = 0; x < size - 1; x++) {
+          const c = modules[y * size + x];
+          if (c === modules[y * size + x + 1] && c === modules[(y + 1) * size + x] && c === modules[(y + 1) * size + x + 1]) score += 3;
+        }
+      }
+      let darkCount = 0;
+      for (let i = 0; i < modules.length; i++) if (modules[i]) darkCount++;
+      score += Math.floor(Math.abs(darkCount * 20 - modules.length * 10) / modules.length) * 10;
+      return score;
+    };
+
+    let bestMask = 0;
+    let bestPen = Infinity;
+    for (let mask = 0; mask < 8; mask++) {
+      applyMask(mask);
+      drawFormat(mask);
+      const pen = penaltyScore();
+      if (pen < bestPen) {
+        bestPen = pen;
+        bestMask = mask;
+      }
+      applyMask(mask);
+    }
+    applyMask(bestMask);
+    drawFormat(bestMask);
+    return { version, size, modules };
+  }
+
+  function renderQrSvg(text) {
+    const qr = encodeQrMatrix(text);
+    if (!qr) return '';
+    const margin = 2;
+    const total = qr.size + margin * 2;
+    const parts = [];
+    for (let y = 0; y < qr.size; y++) {
+      for (let x = 0; x < qr.size; x++) {
+        if (qr.modules[y * qr.size + x]) parts.push(`M${x + margin},${y + margin}h1v1h-1z`);
+      }
+    }
+    return `<svg class="account-qr-svg" viewBox="0 0 ${total} ${total}" role="img" aria-label="Código QR para vincular televisor"><rect width="${total}" height="${total}" fill="#ffffff"/><path d="${parts.join('')}" fill="#07080c"/></svg>`;
+  }
+
+  async function refresh({ force = false, notify: showToast = false } = {}) {
+    const state = readState();
+    if (!state.token) {
+      refreshUi();
+      return { ok: false, authenticated: false, access: null };
+    }
+    if (!force && Date.now() - (state.lastCheckedAt || 0) < REFRESH_TTL_MS && hasAccess()) {
+      return { ok: true, authenticated: true, access: state.access, cached: true };
+    }
+    if (refreshPromise) return refreshPromise;
+
+    refreshPromise = (async () => {
+      try {
+        const res = await requestJson('/api/auth/me', { token: state.token });
+        if (res.status === 200) {
+          if (res.data?.authenticated === false) {
+            clearState();
+            refreshUi();
+            if (showToast) notify('Tu sesión expiró. Volvé a ingresar con tu correo.');
+            return { ok: true, authenticated: false, access: null };
+          }
+          const access = normalizeAccess(res.data?.access);
+          const next = writeState({
+            token: state.token,
+            email: res.data?.user?.email || state.email,
+            country: res.data?.user?.country || state.country,
+            access,
+            lastCheckedAt: Date.now(),
+          });
+          refreshUi();
+          if (showToast) {
+            notify(
+              hasAccess()
+                ? `Cuenta activa · ${daysRemaining()} día(s) restantes`
+                : 'Tu prueba o pase finalizó. Podés activarlo desde la web.',
+            );
+          }
+          return { ok: true, authenticated: true, access: next.access };
+        }
+        if (res.status === 401 || res.status === 403) {
+          clearState();
+          refreshUi();
+          if (showToast) notify('Sesión inválida. Volvé a iniciar sesión.');
+          return { ok: false, authenticated: false, access: null };
+        }
+        // Respuesta 5xx: conserva el estado en caché (tolerancia sin conexión / fallas transitorias).
+        refreshUi();
+        if (showToast) notify('El servidor no respondió. Se conserva tu estado actual.');
+        return { ok: false, offline: true, authenticated: true, access: state.access };
+      } catch {
+        refreshUi();
+        if (showToast) notify('Sin conexión para comprobar tu cuenta.');
+        return { ok: false, offline: true, authenticated: true, access: state.access };
+      } finally {
+        refreshPromise = null;
+      }
+    })();
+
+    return refreshPromise;
+  }
+
+  async function logout() {
+    const state = readState();
+    if (state.token) {
+      await requestJson('/api/auth/logout', { method: 'POST', token: state.token }).catch(() => {});
+    }
+    clearState();
+    refreshUi();
+    return true;
+  }
+
+  function formatExpiry(expiresAt) {
+    if (!expiresAt) return '';
+    try {
+      return new Date(expiresAt).toLocaleDateString('es-AR', {
+        day: 'numeric',
+        month: 'short',
+        year: 'numeric',
+      });
+    } catch {
+      return '';
+    }
+  }
+
+  function refreshUi() {
+    if (typeof document === 'undefined') return;
+    const card = document.getElementById?.('accountSettingsCard');
+    if (!card) return;
+
+    const state = readState();
+    const titleEl = document.getElementById('accStatusTitle');
+    const detailEl = document.getElementById('accStatusDetail');
+    const badgeEl = document.getElementById('accStatusBadge');
+    const primaryBtn = document.getElementById('accPrimaryBtn');
+    const portalBtn = document.getElementById('accPortalBtn');
+    const refreshBtn = document.getElementById('accRefreshBtn');
+    const logoutBtn = document.getElementById('accLogoutBtn');
+
+    const toggleHidden = (el, hide) => {
+      if (!el) return;
+      el.hidden = hide;
+      el.classList?.toggle?.('hidden', hide);
+    };
+
+    if (!state.token) {
+      if (titleEl) titleEl.textContent = '3 días gratis con tu correo';
+      if (detailEl) detailEl.textContent = 'Sin tarjeta ni cobros automáticos. Iniciá sesión con un código de 6 dígitos para reproducir.';
+      if (badgeEl) {
+        badgeEl.textContent = 'Sin conectar';
+        badgeEl.className = 'chip account-badge';
+      }
+      if (primaryBtn) primaryBtn.textContent = 'Iniciar sesión / 3 días gratis';
+      toggleHidden(portalBtn, false);
+      if (portalBtn) portalBtn.textContent = 'Ver planes';
+      toggleHidden(refreshBtn, true);
+      toggleHidden(logoutBtn, true);
+      return;
+    }
+
+    const active = hasAccess();
+    const remaining = daysRemaining();
+    const isTrial = state.access?.planId === 'trial' || state.access?.state === 'trial';
+    const expiryText = formatExpiry(state.access?.expiresAt);
+
+    if (titleEl) titleEl.textContent = state.email || 'Cuenta conectada';
+    if (active) {
+      const kindLabel = isTrial ? 'Prueba gratuita activa' : 'Pase activo';
+      if (detailEl) {
+        detailEl.textContent = `${kindLabel} · ${remaining} día(s) restantes${expiryText ? ` (vence el ${expiryText})` : ''}.`;
+      }
+      if (badgeEl) {
+        badgeEl.textContent = `${remaining} día(s)`;
+        badgeEl.className = 'chip account-badge ok';
+      }
+      if (primaryBtn) primaryBtn.textContent = isTrial ? 'Comprar pase único' : 'Extender pase';
+      toggleHidden(portalBtn, true);
+    } else {
+      if (detailEl) {
+        detailEl.textContent = isTrial
+          ? 'Tu prueba gratuita finalizó. Elegí un pase de 30, 90 o 365 días en la web (sin débito automático).'
+          : 'Tu pase finalizó. Elegí un nuevo pase en la web y tocá Actualizar estado.';
+      }
+      if (badgeEl) {
+        badgeEl.textContent = 'Vencido';
+        badgeEl.className = 'chip account-badge warn';
+      }
+      if (primaryBtn) primaryBtn.textContent = 'Activar pase';
+      toggleHidden(portalBtn, false);
+      if (portalBtn) portalBtn.textContent = 'Ver planes';
+    }
+    toggleHidden(refreshBtn, false);
+    toggleHidden(logoutBtn, false);
+  }
+
+  function html() {
+    return `<section class="set-card set-card-account" id="accountSettingsCard">
+      <h2><svg class="set-head-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg>Cuenta Nébula</h2>
+      <div class="account-summary">
+        <span class="account-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg></span>
+        <div class="account-copy">
+          <div class="account-title-row"><h3 id="accStatusTitle">3 días gratis con tu correo</h3><span class="chip account-badge" id="accStatusBadge">Sin conectar</span></div>
+          <p id="accStatusDetail">Sin tarjeta ni cobros automáticos. Iniciá sesión con un código de 6 dígitos para reproducir.</p>
+        </div>
+      </div>
+      <div class="m-actions set-actions-start">
+        <button type="button" class="btn primary" id="accPrimaryBtn">Iniciar sesión / 3 días gratis</button>
+        <button type="button" class="btn" id="accPortalBtn">Ver planes</button>
+        <button type="button" class="btn hidden" id="accRefreshBtn">Actualizar estado</button>
+        <button type="button" class="btn" id="accTvBtn">Vincular TV</button>
+        <button type="button" class="btn danger-ghost hidden" id="accLogoutBtn">Cerrar sesión</button>
+      </div>
+    </section>`;
+  }
+
+  function bind() {
+    if (typeof document === 'undefined') return;
+    refreshUi();
+    const primaryBtn = document.getElementById('accPrimaryBtn');
+    const portalBtn = document.getElementById('accPortalBtn');
+    const refreshBtn = document.getElementById('accRefreshBtn');
+    const tvBtn = document.getElementById('accTvBtn');
+    const logoutBtn = document.getElementById('accLogoutBtn');
+
+    if (primaryBtn) {
+      primaryBtn.onclick = () => {
+        const state = readState();
+        if (!state.token) openAccountModal({ reason: 'settings' });
+        else if (hasAccess()) openExternalUrl(plansUrl());
+        else openAccountModal({ reason: 'settings' });
+      };
+    }
+    if (portalBtn) portalBtn.onclick = () => openExternalUrl(plansUrl());
+    if (tvBtn) {
+      tvBtn.onclick = () => {
+        if (isTvMode() && !readState().token) openAccountModal({ reason: 'settings' });
+        else openExternalUrl(tvUrl());
+      };
+    }
+    if (refreshBtn) {
+      refreshBtn.onclick = async () => {
+        if (refreshBtn.disabled) return;
+        refreshBtn.disabled = true;
+        refreshBtn.textContent = 'Consultando…';
+        try {
+          await refresh({ force: true, notify: true });
+        } finally {
+          if (refreshBtn.isConnected) {
+            refreshBtn.disabled = false;
+            refreshBtn.textContent = 'Actualizar estado';
+          }
+        }
+      };
+    }
+    if (logoutBtn) {
+      logoutBtn.onclick = async () => {
+        await logout();
+        notify('Sesión cerrada');
+      };
+    }
+  }
+
+  function openAccountModal({ reason = 'playback' } = {}) {
+    if (typeof App === 'undefined' || typeof App.showModal !== 'function' || typeof document === 'undefined') {
+      return Promise.resolve(hasAccess());
+    }
+
+    return new Promise((resolve) => {
+      let settled = false;
+      let unlocked = hasAccess();
+      let step = readState().token ? 'expired' : (isTvMode() ? 'tvpair' : 'email');
+      let pendingEmail = readState().email || '';
+      let expiredNotice = '';
+      let pairTimer = null;
+      let pairRunId = 0;
+
+      const stopPairPolling = () => {
+        pairRunId++;
+        if (pairTimer !== null && typeof clearInterval === 'function') {
+          clearInterval(pairTimer);
+        }
+        pairTimer = null;
+      };
+
+      const finish = () => {
+        stopPairPolling();
+        if (settled) return;
+        settled = true;
+        resolve(unlocked || hasAccess());
+      };
+
+      const renderModalBody = () => {
+        const host = document.getElementById('accModalBody');
+        if (!host) return;
+        const state = readState();
+        if (step !== 'tvpair') stopPairPolling();
+
+        if (step === 'tvpair') {
+          const shortHost = apiBase().replace(/^https?:\/\//i, '');
+          host.innerHTML = `
+            <div class="account-tv-pair">
+              <div class="account-tv-info">
+                <h2>Vinculá tu televisor en segundos</h2>
+                <p class="account-modal-copy">Escaneá este QR con tu celular o entrá a <strong class="account-tv-url">${escapeHtml(shortHost)}/tv</strong> e ingresá el código:</p>
+                <div class="account-tv-code" id="accPairCode">···-···</div>
+                <p class="account-modal-copy" id="accPairStatus">Generando código de vinculación…</p>
+              </div>
+              <div class="account-tv-qr" id="accPairQr" aria-label="Código QR de vinculación">
+                <span class="account-tv-qr-wait">Cargando QR…</span>
+              </div>
+            </div>
+            <p class="account-status-msg hidden" id="accMsg" role="status" aria-live="polite"></p>
+            <div class="m-actions">
+              <button type="button" class="btn" id="accCancel">Ahora no</button>
+              <button type="button" class="btn" id="accUseEmail">Ingresar con correo</button>
+              <button type="button" class="btn primary" id="accRefreshPair">Generar nuevo código</button>
+            </div>`;
+          const codeEl = document.getElementById('accPairCode');
+          const qrEl = document.getElementById('accPairQr');
+          const statusEl = document.getElementById('accPairStatus');
+          const msgEl = document.getElementById('accMsg');
+          const regenBtn = document.getElementById('accRefreshPair');
+          document.getElementById('accCancel').onclick = () => App.closeModal();
+          document.getElementById('accUseEmail').onclick = () => {
+            stopPairPolling();
+            step = 'email';
+            renderModalBody();
+          };
+
+          const startPairingSession = async () => {
+            stopPairPolling();
+            const runId = pairRunId;
+            msgEl?.classList.add('hidden');
+            if (codeEl) codeEl.textContent = '···-···';
+            if (statusEl) statusEl.textContent = 'Generando código de vinculación…';
+            if (regenBtn) regenBtn.disabled = true;
+
+            const pair = await requestTvPair();
+            if (runId !== pairRunId || !document.getElementById('accModalBody')) return;
+            if (regenBtn) regenBtn.disabled = false;
+
+            if (!pair.ok) {
+              if (codeEl) codeEl.textContent = '---';
+              if (statusEl) statusEl.textContent = 'No pudimos conectar con el servidor.';
+              if (msgEl) {
+                msgEl.textContent = pair.error || 'Revisá tu conexión o usá el ingreso con correo.';
+                msgEl.classList.remove('hidden');
+              }
+              return;
+            }
+
+            if (codeEl) codeEl.textContent = pair.formattedCode;
+            if (qrEl) qrEl.innerHTML = renderQrSvg(pair.qrUrl) || escapeHtml(pair.formattedCode);
+            if (statusEl) statusEl.textContent = 'Esperando confirmación desde tu celular (3 días gratis sin tarjeta)…';
+
+            if (typeof setInterval === 'function') {
+              pairTimer = setInterval(async () => {
+                if (runId !== pairRunId || !document.getElementById('accModalBody')) {
+                  stopPairPolling();
+                  return;
+                }
+                const poll = await pollTvPairStatus(pair.code);
+                if (runId !== pairRunId || !document.getElementById('accModalBody')) return;
+                if (poll.status === 'authorized') {
+                  stopPairPolling();
+                  if (poll.access?.hasAccess) {
+                    unlocked = true;
+                    notify('¡Televisor vinculado!');
+                    App.closeModal();
+                  } else {
+                    pendingEmail = poll.email || '';
+                    step = 'expired';
+                    renderModalBody();
+                  }
+                } else if (poll.status === 'expired') {
+                  stopPairPolling();
+                  if (statusEl) statusEl.textContent = 'El código venció. Generá uno nuevo.';
+                }
+              }, 2500);
+            }
+          };
+
+          if (regenBtn) regenBtn.onclick = startPairingSession;
+          regenBtn?.focus?.();
+          startPairingSession();
+          return;
+        }
+
+        if (step === 'email') {
+          host.innerHTML = `
+            <h2>Iniciar sesión en Nébula</h2>
+            <p class="account-modal-copy">${
+              reason === 'playback'
+                ? 'Ingresá tu correo para continuar. Si ya tenés cuenta recuperás tu acceso actual; si es tu primera vez tenés 3 días gratis sin tarjeta.'
+                : 'Ingresá tu correo y te enviamos un código de 6 dígitos. Si ya tenés cuenta recuperás tu acceso; si sos nuevo activás 3 días gratis sin tarjeta.'
+            }</p>
+            <div class="account-field">
+              <label for="accEmail">Correo electrónico</label>
+              <input type="email" id="accEmail" class="account-input" autocomplete="email" placeholder="tu@correo.com" value="${escapeHtml(pendingEmail)}" />
+            </div>
+            <p class="account-status-msg hidden" id="accMsg" role="status" aria-live="polite"></p>
+            <div class="m-actions">
+              <button type="button" class="btn" id="accCancel">Ahora no</button>
+              <button type="button" class="btn primary" id="accSendOtp">Enviar código</button>
+            </div>`;
+          const emailInput = document.getElementById('accEmail');
+          const msgEl = document.getElementById('accMsg');
+          const sendBtn = document.getElementById('accSendOtp');
+          document.getElementById('accCancel').onclick = () => App.closeModal();
+
+          const showError = (msg) => {
+            if (!msgEl) return;
+            msgEl.textContent = msg;
+            msgEl.classList.remove('hidden');
+          };
+
+          const submitEmail = async () => {
+            const emailVal = String(emailInput?.value || '').trim();
+            if (!emailVal) {
+              showError('Ingresá tu correo para enviarte el código.');
+              emailInput?.focus();
+              return;
+            }
+            sendBtn.disabled = true;
+            sendBtn.textContent = 'Enviando…';
+            msgEl?.classList.add('hidden');
+            const res = await requestOtp(emailVal);
+            if (!document.getElementById('accModalBody')) return;
+            sendBtn.disabled = false;
+            sendBtn.textContent = 'Enviar código';
+            if (!res.ok) {
+              showError(res.error);
+              return;
+            }
+            pendingEmail = res.email;
+            step = 'code';
+            renderModalBody();
+          };
+
+          sendBtn.onclick = submitEmail;
+          emailInput?.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              submitEmail();
+            }
+          });
+          emailInput?.focus();
+          return;
+        }
+
+        if (step === 'code') {
+          host.innerHTML = `
+            <h2>Ingresá el código de 6 dígitos</h2>
+            <p class="account-modal-copy">Te enviamos un código a <strong>${escapeHtml(pendingEmail)}</strong>. Revisá también correo no deseado.</p>
+            <div class="account-field">
+              <label for="accCode">Código de verificación</label>
+              <input type="text" id="accCode" class="account-input account-otp-input" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="000000" />
+            </div>
+            <div class="account-secondary-row">
+              <button type="button" class="btn" id="accBackEmail">Cambiar correo</button>
+            </div>
+            <p class="account-status-msg hidden" id="accMsg" role="status" aria-live="polite"></p>
+            <div class="m-actions">
+              <button type="button" class="btn" id="accCancel">Cancelar</button>
+              <button type="button" class="btn primary" id="accVerifyOtp">Iniciar sesión</button>
+            </div>`;
+          const codeInput = document.getElementById('accCode');
+          const msgEl = document.getElementById('accMsg');
+          const verifyBtn = document.getElementById('accVerifyOtp');
+          document.getElementById('accCancel').onclick = () => App.closeModal();
+          document.getElementById('accBackEmail').onclick = () => {
+            step = 'email';
+            renderModalBody();
+          };
+
+          const showError = (msg) => {
+            if (!msgEl) return;
+            msgEl.textContent = msg;
+            msgEl.classList.remove('hidden');
+          };
+
+          const submitCode = async () => {
+            const rawCode = String(codeInput?.value || '').trim();
+            verifyBtn.disabled = true;
+            verifyBtn.textContent = 'Verificando…';
+            msgEl?.classList.add('hidden');
+            const res = await verifyOtp(pendingEmail, rawCode);
+            if (!document.getElementById('accModalBody')) return;
+            verifyBtn.disabled = false;
+            verifyBtn.textContent = 'Iniciar sesión';
+            if (!res.ok) {
+              showError(res.error);
+              return;
+            }
+            if (res.access?.hasAccess) {
+              unlocked = true;
+              notify(res.trialGranted ? '¡3 días gratis activados!' : 'Sesión iniciada');
+              App.closeModal();
+              return;
+            }
+            expiredNotice = res.trialBlockedReason
+              ? 'Este equipo o correo ya utilizó su prueba gratuita. Elegí un pase único para continuar.'
+              : '';
+            step = 'expired';
+            renderModalBody();
+          };
+
+          verifyBtn.onclick = submitCode;
+          codeInput?.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              submitCode();
+            }
+          });
+          codeInput?.focus();
+          return;
+        }
+
+        const isTrial = state.access?.planId === 'trial' || state.access?.state === 'trial' || state.access?.trialUsed;
+        const tvShortHost = apiBase().replace(/^https?:\/\//i, '');
+        host.innerHTML = `
+          <h2>${expiredNotice ? 'Prueba gratuita ya utilizada' : isTrial ? 'Tu prueba gratuita finalizó' : 'Tu pase de Nébula finalizó'}</h2>
+          <p class="account-modal-copy">Cuenta: <strong>${escapeHtml(state.email || pendingEmail)}</strong>.<br>${
+            expiredNotice
+              ? escapeHtml(expiredNotice)
+              : isTvMode()
+              ? `Activá un pase de 30, 90 o 365 días desde tu celular en <strong>${escapeHtml(tvShortHost)}/suscripcion</strong> (sin débito automático) y luego tocá Verificar.`
+              : 'Activá un pase de 30, 90 o 365 días en la web (pago único, sin débito automático) y luego tocá Verificar.'
+          }</p>
+          <div class="account-secondary-row">
+            <button type="button" class="btn" id="accCheckAgain">Ya pagué · Verificar ahora</button>
+            ${isTvMode() ? '<button type="button" class="btn" id="accPairQr">Vincular otra cuenta con QR</button>' : ''}
+            <button type="button" class="btn" id="accSwitchAccount">Cambiar cuenta</button>
+          </div>
+          <p class="account-status-msg hidden" id="accMsg" role="status" aria-live="polite"></p>
+          <div class="m-actions">
+            <button type="button" class="btn" id="accCancel">Ahora no</button>
+            <button type="button" class="btn primary" id="accOpenPlans">Elegir pase en la web</button>
+          </div>`;
+
+        const msgEl = document.getElementById('accMsg');
+        const checkBtn = document.getElementById('accCheckAgain');
+        const pairQrBtn = document.getElementById('accPairQr');
+        const switchBtn = document.getElementById('accSwitchAccount');
+        const openBtn = document.getElementById('accOpenPlans');
+        document.getElementById('accCancel').onclick = () => App.closeModal();
+        if (pairQrBtn) {
+          pairQrBtn.onclick = async () => {
+            await logout();
+            pendingEmail = '';
+            step = 'tvpair';
+            renderModalBody();
+          };
+        }
+
+        openBtn.onclick = () => openExternalUrl(plansUrl());
+        checkBtn.onclick = async () => {
+          checkBtn.disabled = true;
+          checkBtn.textContent = 'Verificando…';
+          msgEl?.classList.add('hidden');
+          const res = await refresh({ force: true });
+          if (!document.getElementById('accModalBody')) return;
+          checkBtn.disabled = false;
+          checkBtn.textContent = 'Ya pagué · Verificar ahora';
+          if (hasAccess()) {
+            unlocked = true;
+            notify('¡Pase de Nébula activado!');
+            App.closeModal();
+            return;
+          }
+          if (msgEl) {
+            msgEl.textContent = res.offline
+              ? 'No pudimos conectar con el servidor. Revisá tu conexión y reintentá.'
+              : 'Todavía no vemos un pase activo en esta cuenta. Si ya pagaste, esperá unos segundos y volvé a tocar Verificar.';
+            msgEl.classList.remove('hidden');
+          }
+        };
+        switchBtn.onclick = async () => {
+          await logout();
+          pendingEmail = '';
+          step = 'email';
+          renderModalBody();
+        };
+        openBtn.focus();
+      };
+
+      App.showModal('<div id="accModalBody" class="account-modal-body"></div>', renderModalBody, finish);
+    });
+  }
+
+  async function ensureAccess() {
+    if (hasAccess()) return true;
+    const state = readState();
+    if (state.token) {
+      await refresh({ force: true });
+      if (hasAccess()) {
+        notify('¡Acceso de Nébula activado!');
+        return true;
+      }
+    }
+    return openAccountModal({ reason: 'playback' });
+  }
+
+  function start() {
+    if (started) return;
+    started = true;
+    loadRuntimeInfo();
+    if (typeof setTimeout === 'function' && readState().token) {
+      setTimeout(() => refresh({ force: true }).catch(() => {}), 2000);
+    }
+    if (typeof setInterval === 'function') {
+      setInterval(() => {
+        if (!document?.hidden && readState().token && Date.now() - (readState().lastCheckedAt || 0) > PERIODIC_REFRESH_MS) {
+          refresh().catch(() => {});
+        }
+      }, PERIODIC_REFRESH_MS);
+    }
+    if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+      document.addEventListener('visibilitychange', () => {
+        if (!document.hidden && readState().token) refresh().catch(() => {});
+      });
+    }
+  }
+
+  return {
+    apiBase,
+    plansUrl,
+    tvUrl,
+    getState,
+    hasAccess,
+    daysRemaining,
+    requestOtp,
+    verifyOtp,
+    requestTvPair,
+    pollTvPairStatus,
+    renderQrSvg,
+    refresh,
+    logout,
+    ensureAccess,
+    openAccountModal,
+    html,
+    bind,
+    refreshUi,
+    start,
+  };
+})();
+
+if (typeof module === 'object' && module.exports) {
+  module.exports = NebulaAccount;
+}
