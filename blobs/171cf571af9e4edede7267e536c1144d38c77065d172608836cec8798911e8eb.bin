@@ -1,0 +1,525 @@
+'use strict';
+/**
+ * Navegación espacial con control remoto (D-pad) para Android TV / Google TV.
+ * Solo se activa cuando <body> tiene la clase "platform-tv".
+ *  - Flechas: mueven el foco al elemento más cercano en esa dirección.
+ *  - OK / Enter: activa el elemento enfocado (también tarjetas con role="button").
+ *  - Tras cada cambio de pantalla, enfoca automáticamente el primer elemento útil.
+ */
+(() => {
+  const SELECTOR = [
+    'button:not([disabled])',
+  'summary',
+  '[role="button"]:not([aria-disabled="true"])',
+    'a[href]',
+    'select:not([disabled])',
+    'input:not([disabled]):not([type="hidden"])',
+    'textarea:not([disabled])',
+    '[tabindex]:not([tabindex="-1"])',
+  ].join(',');
+  const DIRS = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right' };
+  const isTv = () => document.body.classList.contains('platform-tv');
+  let cachedRoot=null,cachedCandidates=null,rectCache=new WeakMap(),lastMarked=null,lastKey=null,autoKey=null,userActed=false;
+  function invalidateCandidates(){cachedCandidates=null;}
+
+  function visible(el) {
+    if (!el.getClientRects().length) return false;
+    const style = getComputedStyle(el);
+    if (style.visibility === 'hidden' || style.display === 'none') return false;
+    if (el.closest('.hidden,[hidden],[aria-hidden="true"]')) return false;
+    for (let parent = el.parentElement; parent; parent = parent.parentElement) {
+      if (parent.tagName === 'DETAILS' && !parent.open && !parent.querySelector(':scope > summary')?.contains(el)) return false;
+    }
+    return true;
+  }
+
+  // Con el reproductor abierto el foco no debe escapar a las tarjetas de detrás.
+  function playerLayer() {
+    const layer = document.getElementById('playerLayer');
+    return layer && !layer.classList.contains('hidden') ? layer : null;
+  }
+  function scope() {
+    const modal = document.getElementById('modalLayer');
+    if (modal && !modal.classList.contains('hidden')) return modal;
+    const dialog = document.getElementById('pDialog');
+    if (dialog && !dialog.classList.contains('hidden')) return dialog;
+    const layer = playerLayer();
+    if (!layer) return document;
+    // Menú del reproductor abierto (calidad, audio, subtítulos, velocidad): el foco se queda en él.
+    return Array.from(layer.querySelectorAll('.p-menu')).find((menu) => !menu.classList.contains('hidden') && menu.getClientRects().length && menu.querySelector(SELECTOR)) || layer;
+  }
+  const inPlayer = () => { const root = scope(); return root !== document && (root === playerLayer() || root.classList.contains('p-menu')); };
+
+  function candidates() {
+    const root=scope();
+    if(root!==cachedRoot||!cachedCandidates){cachedRoot=root;cachedCandidates=Array.from(root.querySelectorAll(SELECTOR)).filter(visible);}
+    return cachedCandidates;
+  }
+
+  function firstInContent() {
+    const content = document.getElementById('content');
+    if (!content) return null;
+    const preferred = content.querySelector('#btnPlaySel, #btnResumeSeries, #btnPlayFirstEp, .detail-tab.active');
+    if (preferred && visible(preferred)) return preferred;
+    return Array.from(content.querySelectorAll(SELECTOR)).find(visible) || null;
+  }
+
+  function rectOf(el) {
+    if(rectCache.has(el))return rectCache.get(el);
+    const r = el.getBoundingClientRect();
+    const rect={ left: r.left, right: r.right, top: r.top, bottom: r.bottom, cx: r.left + r.width / 2, cy: r.top + r.height / 2 };rectCache.set(el,rect);return rect;
+  }
+
+  // Panel de un <details class="nav-group"> abierto (menú Catálogo / Biblioteca)
+  function openPanel(from) {
+    const group = from.closest('details[open]');
+    if (!group) return null;
+    const panel = group.querySelector('.nav-panel, .d-more-panel');
+    return panel && visible(panel) ? panel : null;
+  }
+
+  function bestIn(from, dir, list) {
+    const a = rectOf(from);
+    let winner = null;
+    let winnerScore = Infinity;
+    for (const el of list) {
+      if (el === from || from.contains(el) || el.contains(from)) continue;
+      const b = rectOf(el);
+      let primary;
+      let secondary;
+      switch (dir) {
+        case 'up': primary = a.top - b.bottom; secondary = Math.abs(a.cx - b.cx); if (b.cy >= a.cy - 1) continue; break;
+        case 'down': primary = b.top - a.bottom; secondary = Math.abs(a.cx - b.cx); if (b.cy <= a.cy + 1) continue; break;
+        case 'left': primary = a.left - b.right; secondary = Math.abs(a.cy - b.cy); if (b.cx >= a.cx - 1) continue; break;
+        default: primary = b.left - a.right; secondary = Math.abs(a.cy - b.cy); if (b.cx <= a.cx + 1) continue;
+      }
+      // Solapamiento en el eje perpendicular: favorece elementos alineados (misma fila / columna)
+      const overlaps = dir === 'up' || dir === 'down'
+        ? Math.min(a.right, b.right) - Math.max(a.left, b.left) > 0
+        : Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 0;
+      const score = Math.max(0, primary) + secondary * (overlaps ? 0.6 : 2.4) + (overlaps ? 0 : 40);
+      if (score < winnerScore) { winnerScore = score; winner = el; }
+    }
+    return winner;
+  }
+
+  const HEADER_ITEMS = '#titlebar button,#sidebar .sidebar-scroll > button,#sidebar .nav-group > summary';
+  const inHeader = (el) => Boolean(el.closest('#titlebar') || el.closest('#sidebar'));
+
+  // Ramas del ancestro común más cercano que contienen a cada control: dicen si en la maquetación
+  // están apilados (uno sobre otro) o lado a lado (dos columnas, dos tarjetas de la misma fila).
+  function branchRects(from, el) {
+    const chain = new Set();
+    for (let node = from; node; node = node.parentElement) chain.add(node);
+    let b = el;
+    let common = el.parentElement;
+    while (common && !chain.has(common)) { b = common; common = common.parentElement; }
+    if (!common) return null;
+    let a = from;
+    while (a.parentElement && a.parentElement !== common) a = a.parentElement;
+    return [rectOf(a), rectOf(b)];
+  }
+  // 'stacked': uno encima del otro (comparten columna); 'side': lado a lado; 'diagonal': ni lo uno ni lo otro.
+  function relation(from, el) {
+    const pair = branchRects(from, el);
+    if (!pair) return 'diagonal';
+    const [a, b] = pair;
+    if (Math.min(a.right, b.right) - Math.max(a.left, b.left) > 1) return 'stacked';
+    const shared = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+    return shared > Math.min(a.bottom - a.top, b.bottom - b.top) * 0.5 ? 'side' : 'diagonal';
+  }
+  const sideBySide = (from, el) => relation(from, el) === 'side';
+
+  // Tarjeta que quedó fuera de la vista dentro de OTRA fila con scroll horizontal: no es un destino
+  // (antes ← en la primera tarjeta de una fila saltaba a una tarjeta oculta de otra fila).
+  function clippedOut(el, from) {
+    const r = rectOf(el);
+    for (let parent = el.parentElement; parent && parent !== document.body; parent = parent.parentElement) {
+      if (parent.contains(from)) break;
+      if (parent.scrollWidth <= parent.clientWidth + 1) continue;
+      if (getComputedStyle(parent).overflowX === 'visible') continue;
+      const box = rectOf(parent);
+      if (r.right <= box.left + 1 || r.left >= box.right - 1) return true;
+    }
+    return false;
+  }
+
+  // ↑/↓: primero la fila más cercana en esa dirección y, dentro de ella, el control más alineado.
+  // Así se visitan las filas en orden aunque ninguna quede justo en la misma columna.
+  function pickVertical(from, dir, pool) {
+    const a = rectOf(from);
+    const list = [];
+    for (const el of pool) {
+      if (el === from || from.contains(el) || el.contains(from)) continue;
+      const b = rectOf(el);
+      if (dir === 'up' ? b.cy > a.top : b.cy < a.bottom) continue;
+      list.push({ el, b, gap: Math.max(0, dir === 'up' ? a.top - b.bottom : b.top - a.bottom) });
+    }
+    list.sort((x, y) => x.gap - y.gap);
+    const offset = (b) => Math.max(0, Math.max(a.left, b.left) - Math.min(a.right, b.right)) * 4 + Math.abs(a.cx - b.cx);
+    // Primero solo lo que está en la misma columna de la maquetación; si no hay nada, también lo que
+    // queda en diagonal (otra columna, más arriba o más abajo). Lo que está al lado nunca es ↑/↓.
+    const scan = (diagonal) => {
+      let nearest = null;
+      let winner = null;
+      let winnerOffset = Infinity;
+      for (const item of list) {
+        if (nearest) {
+          const n = nearest.b;
+          if (item.gap > nearest.gap + (n.bottom - n.top)) break;
+          const sameRow = (item.b.cy >= n.top && item.b.cy <= n.bottom) || (n.cy >= item.b.top && n.cy <= item.b.bottom);
+          if (!sameRow) continue;
+        }
+        const value = offset(item.b);
+        if (nearest && value >= winnerOffset) continue;
+        if (!item.rel) item.rel = clippedOut(item.el, from) ? 'hidden' : relation(from, item.el);
+        if (item.rel !== 'stacked' && !(diagonal && item.rel === 'diagonal')) continue;
+        if (!nearest) nearest = item;
+        winner = item.el;
+        winnerOffset = value;
+      }
+      return winner;
+    };
+    return scan(false) || scan(true);
+  }
+
+  // ←/→: solo hacia controles de la misma franja o de una columna contigua; al llegar al borde
+  // de una fila el foco se queda donde está en vez de saltar a otra fila.
+  function pickHorizontal(from, dir, pool) {
+    const a = rectOf(from);
+    let winner = null;
+    let winnerScore = Infinity;
+    for (const el of pool) {
+      if (el === from || from.contains(el) || el.contains(from)) continue;
+      const b = rectOf(el);
+      if (dir === 'right' ? b.cx < a.right : b.cx > a.left) continue;
+      const shared = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+      const aligned = shared > Math.min(a.bottom - a.top, b.bottom - b.top) * 0.25;
+      const gap = Math.max(0, dir === 'right' ? b.left - a.right : a.left - b.right);
+      const score = gap + Math.abs(a.cy - b.cy) * (aligned ? 0.6 : 2.4) + (aligned ? 0 : 400);
+      if (score >= winnerScore) continue;
+      if (!aligned && !sideBySide(from, el)) continue;
+      if (clippedOut(el, from)) continue;
+      winner = el;
+      winnerScore = score;
+    }
+    return winner;
+  }
+
+  // Sección activa de la cabecera (o su menú, si la entrada activa está dentro de uno cerrado).
+  function headerTarget(from) {
+    const items = Array.from(document.querySelectorAll(HEADER_ITEMS)).filter(visible);
+    const current = document.querySelector('#sidebar [aria-current="page"], #sidebar .nav-item.active');
+    const owner = current && (visible(current) ? current : current.closest('details')?.querySelector('summary'));
+    if (owner && items.includes(owner)) return owner;
+    const a = rectOf(from);
+    return items.sort((x, y) => Math.abs(rectOf(x).cx - a.cx) - Math.abs(rectOf(y).cx - a.cx))[0] || null;
+  }
+
+  function best(from, dir) {
+    // Sin resultados ni historial no hay tarjeta a la que ir: se sigue con la regla general
+    // (antes ↓ no hacía nada y «Buscar por persona» quedaba fuera de alcance desde el campo).
+    if(from.id==='searchInput'&&dir==='down'){const first=Array.from(document.querySelectorAll('#searchResults [role="button"],#searchHist button')).find(visible);if(first)return first;}
+    const vertical = dir === 'up' || dir === 'down';
+    // Menú Catálogo / Biblioteca abierto: el foco no sale del panel (antes ↓ en la última entrada
+    // lo llevaba a las tarjetas de detrás con el menú todavía encima).
+    const panel = openPanel(from);
+    if (panel && vertical) {
+      const inner = Array.from(panel.querySelectorAll(SELECTOR)).filter(visible);
+      const own = from.closest('details').querySelector('summary');
+      if (own && !inner.includes(own)) inner.push(own);
+      return bestIn(from, dir, inner);
+    }
+    if (panel && panel.contains(from)) return null;
+    const root = scope();
+    if (root === document && inHeader(from)) {
+      if (!vertical) return bestIn(from, dir, Array.from(document.querySelectorAll(HEADER_ITEMS)).filter(visible));
+      // La cabecera es el tope: ↑ no hace nada y ↓ entra por la primera fila visible del contenido.
+      return dir === 'up' ? null : pickVertical(from, dir, candidates().filter((el) => !inHeader(el)));
+    }
+    const pool = root === document ? candidates().filter((el) => !inHeader(el)) : candidates();
+    if (!vertical) {
+      const grid=from.closest('.grid');
+      if(grid){
+        const source=rectOf(from);
+        return bestIn(from,dir,Array.from(grid.querySelectorAll(SELECTOR)).filter(el=>visible(el)&&Math.min(rectOf(el).bottom,source.bottom)>Math.max(rectOf(el).top,source.top)));
+      }
+      return pickHorizontal(from, dir, pool);
+    }
+    const next = pickVertical(from, dir, pool);
+    if (next || dir === 'down' || root !== document) return next;
+    return headerTarget(from);
+  }
+
+  // Título de la fila o sección que precede al control (cabecera de fila, título de página).
+  function headingFor(el, content) {
+    for (let node = el; node && node !== content; node = node.parentElement) {
+      let previous = node.previousElementSibling;
+      while (previous && !previous.getClientRects().length) previous = previous.previousElementSibling;
+      if (previous && previous.matches('.row-head,.page-heading,h1,h2,h3')) return previous;
+    }
+    return null;
+  }
+
+  // Tras enfocar, además del control debe verse su contexto: el título de su fila y, mientras quepa,
+  // el principio de la página (destacado, título, filtros). Tampoco puede quedar bajo la franja de ayuda.
+  // Contenedor que se desplaza en vertical: la página (#content) o, en un aviso o menú del
+  // reproductor, la lista con scroll más cercana.
+  function scrollBox(el) {
+    const root = scope();
+    if (root === document) {
+      const page = document.getElementById('content');
+      return page && page.contains(el) ? page : null;
+    }
+    for (let parent = el.parentElement; parent && root.contains(parent); parent = parent.parentElement) {
+      if (parent.scrollHeight > parent.clientHeight + 1 && /auto|scroll/.test(getComputedStyle(parent).overflowY)) return parent;
+    }
+    return null;
+  }
+
+  function reveal(el) {
+    const content = scrollBox(el);
+    if (!content) return;
+    const box = content.getBoundingClientRect();
+    const style = getComputedStyle(content);
+    const hint = content.id === 'content' ? document.querySelector('.tv-remote-hint') : null;
+    const hintTop = hint && hint.getClientRects().length ? hint.getBoundingClientRect().top : box.bottom;
+    const viewTop = box.top + (parseFloat(style.scrollPaddingTop) || 0);
+    const viewBottom = Math.min(box.bottom - (parseFloat(style.scrollPaddingBottom) || 0), hintTop - 12);
+    const room = viewBottom - viewTop;
+    if (room <= 0) return;
+    // Los interruptores enfocan un <input> sin tamaño: se mide su fila (o su etiqueta).
+    let target = el.getClientRects().length && el.offsetWidth && el.offsetHeight ? el : (el.closest('.set-row') || el.closest('label') || el.parentElement || el);
+    // Botón dentro de una fila enfocable (un episodio): se muestra la fila entera, con su título.
+    const host = el.parentElement ? el.parentElement.closest(SELECTOR) : null;
+    if (host && host !== content && content.contains(host) && host.getBoundingClientRect().height + 20 <= room) target = host;
+    const r = target.getBoundingClientRect();
+    let top = r.top - 10;
+    const bottom = r.bottom + 10;
+    const heading = headingFor(el, content);
+    if (heading) {
+      const h = heading.getBoundingClientRect();
+      if (h.bottom <= r.top + 1 && r.top - h.bottom < Math.max(96, window.innerHeight * 0.13) && bottom - h.top <= room) top = h.top;
+    }
+    let delta = 0;
+    if (bottom - top > room || top < viewTop) delta = top - viewTop;
+    else if (bottom > viewBottom) delta = bottom - viewBottom;
+    // Principio de la página: si el control cabe con la página arriba del todo y ya hay que subir
+    // (o falta poco), se muestra desde el principio para no dejar cortado el destacado o el título.
+    if (bottom + content.scrollTop <= viewBottom && (delta < 0 || content.scrollTop <= room * 0.35)) delta = -content.scrollTop;
+    if (delta) content.scrollTop += delta;
+  }
+
+  function focusEl(el) {
+    if (!el) return false;
+    el.focus({ preventScroll: true });
+    markFocus(el);
+    try { el.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'auto' }); } catch { el.scrollIntoView(false); }
+    reveal(el);
+    return true;
+  }
+
+  function markFocus(el) {
+    if(lastMarked&&lastMarked!==el)lastMarked.classList.remove('tv-focused');
+    lastMarked=el;
+    if (!isTv() || !(el instanceof HTMLElement)) return;
+    el.classList.add('tv-focused');
+    lastKey = { view: document.body.dataset.view || '', id: el.id, tag: el.tagName, data: JSON.stringify(Object.assign({}, el.dataset)), text: (el.textContent || '').trim().slice(0, 80) };
+    // Un menú de la cabecera no se queda abierto cuando el foco ya está en otra parte.
+    document.querySelectorAll('#sidebar details.nav-group[open], details.d-more[open]').forEach((group) => { if (!group.contains(el)) group.open = false; });
+  }
+
+  // La pantalla se volvió a pintar y el control enfocado ya no existe (p. ej. al elegir un perfil en
+  // Ajustes): se busca su equivalente para no mandar el foco al primer control de la página.
+  function sameControl() {
+    if (!lastKey || lastKey.auto || lastKey.view !== (document.body.dataset.view || '')) return null;
+    if (lastKey.id) { const again = document.getElementById(lastKey.id); return again && visible(again) ? again : null; }
+    if (lastKey.data === '{}') return null;
+    const matches = candidates().filter((el) => el.tagName === lastKey.tag && JSON.stringify(Object.assign({}, el.dataset)) === lastKey.data && (el.textContent || '').trim().slice(0, 80) === lastKey.text);
+    return matches.length === 1 ? matches[0] : null;
+  }
+
+  function ensureHint() {
+    if (!isTv() || document.querySelector('.tv-remote-hint')) return;
+    const hint = document.createElement('div');
+    hint.className = 'tv-remote-hint';
+    hint.setAttribute('aria-hidden', 'true');
+    hint.innerHTML = '<span><b>Flechas</b> Explorar</span><span><b>OK</b> Elegir</span><span><b>Atrás</b> Volver</span>';
+    document.body.appendChild(hint);
+  }
+
+  const signature = (el) => el.tagName + '|' + el.id + '|' + JSON.stringify(Object.assign({}, el.dataset)) + '|' + (el.textContent || '').trim().slice(0, 80);
+  // Foco puesto por la app, no por el mando: se recuerda para poder cederlo al botón principal
+  // cuando este aparece más tarde (el destacado de Inicio llega después que las filas).
+  function fallbackFocus() {
+    const done = autoFocus();
+    autoKey = done ? signature(document.activeElement) : null;
+    userActed = false;
+    if (done && lastKey) lastKey.auto = true;
+    return done;
+  }
+  function autoFocus() {
+    const root = scope();
+    if (root !== document && root.classList.contains('p-menu')) return focusEl(candidates().find((el) => el.classList.contains('sel')) || candidates()[0]);
+    if (playerLayer() && root === playerLayer()) return focusEl(document.getElementById('pPlayPause') || candidates()[0]);
+    // La entrada activa puede estar oculta en esta plataforma (Descargas en Tizen): enfocarla dejaba el foco en <body>.
+    const active = document.querySelector('#sidebar .nav-item.active');
+    return focusEl(firstInContent() || (active && visible(active) ? active : null) || candidates()[0]);
+  }
+
+  document.addEventListener('keydown', (event) => {
+    if (!isTv()) return;
+    userActed = true;
+    const dir = DIRS[event.key];
+    const active = document.activeElement;
+    // Con un aviso o el reproductor abiertos, un foco que quedó en la página de detrás no cuenta:
+    // OK no debe pulsar un botón tapado.
+    const root = scope();
+    const inScope = root === document || (active && root.contains(active));
+    const hasFocus = active && active !== document.body && document.contains(active) && visible(active) && inScope;
+
+    // Controles del reproductor ocultos: la primera pulsación solo los muestra (el reproductor
+    // escucha mousemove) y deja el foco en Pausa, en lugar de mover el foco a algo invisible.
+    // OK sobre un botón visible fuera de los controles (p. ej. «Saltar intro») conserva su acción.
+    const ui = document.getElementById('playerUi');
+    const enter = event.key === 'Enter' || event.keyCode === 13 || event.keyCode === 23;
+    if ((dir || enter) && playerLayer() && ui && ui.classList.contains('hide-ui') && inPlayer() && !(enter && hasFocus && !ui.contains(active))) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      document.dispatchEvent(new MouseEvent('mousemove'));
+      focusEl(document.getElementById('pPlayPause'));
+      return;
+    }
+
+    if (enter && !inScope) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (!event.repeat) fallbackFocus();
+      return;
+    }
+
+    if (dir) {
+      rectCache=new WeakMap();
+      // La barra de progreso usa ←/→ para buscar: se dejan pasar a su manejador.
+      if (hasFocus && active.getAttribute('role') === 'slider' && (dir === 'left' || dir === 'right')) return;
+      // Dentro de un campo de texto, izquierda/derecha mueven el cursor
+      if (hasFocus && !active.readOnly && /^(INPUT|TEXTAREA)$/.test(active.tagName) && (dir === 'left' || dir === 'right')) {
+        const value = active.value || '';
+        const atStart = active.selectionStart === 0 && active.selectionEnd === 0;
+        const atEnd = active.selectionStart === value.length;
+        if (!(dir === 'left' && atStart) && !(dir === 'right' && atEnd)) return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      if (!hasFocus) { fallbackFocus(); return; }
+      const next = best(active, dir);
+      if (next) focusEl(next);
+      return;
+    }
+
+    if ((event.key === 'XF86Back' || event.key === 'GoBack' || event.keyCode === 10009) && document.body.classList.contains('platform-tizen')) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!event.repeat) window.dispatchEvent(new CustomEvent('nebulaBack'));
+      return;
+    }
+
+    if ((event.key === 'Enter' || event.keyCode === 13 || event.keyCode === 23) && hasFocus) {
+      if(active.tagName==='SELECT'&&typeof App!=='undefined'&&App.pickSelect){event.preventDefault();event.stopImmediatePropagation();if(!event.repeat)App.pickSelect(active);return;}
+      if(/^(BUTTON|A)$/.test(active.tagName)){event.preventDefault();event.stopImmediatePropagation();if(!event.repeat)active.click();return;}
+      // Tarjetas y elementos con role=button no nativos: simulamos click
+      if (!/^(BUTTON|A|INPUT|SELECT|TEXTAREA)$/.test(active.tagName)) {
+        event.preventDefault();event.stopImmediatePropagation();
+        if(!event.repeat)active.click();
+      }
+    }
+  }, true);
+
+  // Tras renderizar una nueva pantalla, recupera el foco si quedó en <body> o en un nodo eliminado
+  let timer = null;
+  let lastPrimary = null;
+  const recover = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      if (!isTv()) return;
+      ensureHint();
+      const active = document.activeElement;
+      const primary = document.querySelector('#content #btnPlaySel, #content #btnResumeSeries, #content #btnPlayFirstEp, #content .feature-actions .btn.primary');
+      const lost = !active || active === document.body || !document.contains(active) || !visible(active);
+      if (lost && focusEl(sameControl())) { lastPrimary = primary; return; }
+      if (primary !== lastPrimary) {
+        lastPrimary = primary;
+        // Inicio vuelve a enfocar por su cuenta el control equivalente al repintar: se compara por firma.
+        if (primary && visible(primary) && (lost || active.id === 'tbBack' || (!userActed && autoKey && signature(active) === autoKey))) {
+          focusEl(primary);
+          return;
+        }
+      }
+      if (lost) fallbackFocus();
+    }, 180);
+  };
+  const start = () => {
+    new MutationObserver(records=>{
+      if(records.some(record=>record.type==='childList'||record.attributeName!=='class'||String(record.oldValue||'').replace(/\btv-focused\b/g,'').trim()!==String(record.target.className||'').replace(/\btv-focused\b/g,'').trim()))invalidateCandidates();
+    }).observe(document.body,{subtree:true,childList:true,attributes:true,attributeOldValue:true,attributeFilter:['class','hidden','aria-hidden','disabled','open','data-collapsed','aria-expanded']});
+    document.addEventListener('focusin', event => markFocus(event.target));
+    ensureHint();
+    new MutationObserver(recover).observe(document.body, { attributes: true, attributeFilter: ['class'] });
+    const content = document.getElementById('content');
+    if (content) new MutationObserver(recover).observe(content, { childList: true });
+    const modal = document.getElementById('modalLayer');
+    if (modal) new MutationObserver(() => { recover(); if (isTv() && !modal.classList.contains('hidden')) setTimeout(() => focusEl(Array.from(modal.querySelectorAll(SELECTOR)).find(visible)), 60); }).observe(modal, { attributes: true, attributeFilter: ['class'], childList: true });
+    // Reproductor: al abrirse el foco entra en él (antes seguía en el botón de la ficha, tapado, y un
+    // segundo OK lo volvía a pulsar) y al cerrarse vuelve al control que lo abrió (antes se perdía).
+    const player = document.getElementById('playerLayer');
+    if (player) {
+      let wasOpen = !player.classList.contains('hidden');
+      let opener = null;
+      const lostFocus = () => { const active = document.activeElement; return !active || active === document.body || !document.contains(active) || !visible(active); };
+      new MutationObserver(() => {
+        const open = !player.classList.contains('hidden');
+        if (open === wasOpen) return;
+        wasOpen = open;
+        if (!isTv()) return;
+        if (open) {
+          const active = document.activeElement;
+          if (active && active !== document.body && !player.contains(active)) opener = active;
+          setTimeout(() => {
+            if (!playerLayer() || !inPlayer() || player.contains(document.activeElement)) return;
+            fallbackFocus();
+            // Controles todavía ocultos: al menos se suelta el botón de detrás.
+            if (!player.contains(document.activeElement) && document.activeElement && document.activeElement.blur) document.activeElement.blur();
+          }, 60);
+        } else {
+          const back = opener;
+          opener = null;
+          setTimeout(() => { if (!playerLayer() && lostFocus() && !(back && document.contains(back) && visible(back) && focusEl(back))) fallbackFocus(); }, 60);
+        }
+      }).observe(player, { attributes: true, attributeFilter: ['class'] });
+      // Cuando los controles aparecen y nadie tiene el foco, va a Pausa (regla de DESIGN.md).
+      const ui = document.getElementById('playerUi');
+      if (ui) new MutationObserver(() => {
+        if (isTv() && playerLayer() && inPlayer() && !ui.classList.contains('hide-ui') && !player.contains(document.activeElement)) setTimeout(() => { if (playerLayer() && inPlayer() && !player.contains(document.activeElement)) fallbackFocus(); }, 60);
+      }).observe(ui, { attributes: true, attributeFilter: ['class'] });
+      // Menús del reproductor: al abrirse el foco entra en la opción elegida; al cerrarse vuelve a su botón.
+      new MutationObserver((records) => {
+        if (!isTv() || !playerLayer()) return;
+        for (const record of records) {
+          const menu = record.target;
+          if (!(menu instanceof HTMLElement) || !menu.classList.contains('p-menu')) continue;
+          const open = !menu.classList.contains('hidden');
+          if (open === !/\bhidden\b/.test(record.oldValue || '')) continue;
+          invalidateCandidates();
+          setTimeout(() => {
+            if (!playerLayer()) return;
+            if (open && !menu.classList.contains('hidden')) { if (!menu.contains(document.activeElement)) fallbackFocus(); }
+            else if (!open && (lostFocus() || menu.contains(document.activeElement))) { if (!focusEl(document.getElementById(menu.id.replace(/Menu$/, '')))) fallbackFocus(); }
+          }, 60);
+        }
+      }).observe(player, { subtree: true, attributes: true, attributeOldValue: true, attributeFilter: ['class'] });
+    }
+    recover();
+  };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start); else start();
+  window.NebulaTvNav = { focusFirst: fallbackFocus };
+})();

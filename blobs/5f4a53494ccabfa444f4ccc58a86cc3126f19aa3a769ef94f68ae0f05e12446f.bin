@@ -1,0 +1,27 @@
+'use strict';
+// The sole renderer entry point that knows Electron's preload and browser storage.
+const isMacDesktop=/Mac/i.test(navigator.platform||'')||/Mac OS X/i.test(navigator.userAgent||'');
+// createWindowsPlatform devuelve un objeto congelado: isMac se incorpora al crearlo
+// (asignarlo después lanzaba TypeError en modo estricto y nunca se aplicaba platform-mac).
+const Platform = Object.freeze({...NebulaWindows.createWindowsPlatform(window.bridge, {
+  read: key => {
+    if(key!=='nebula_store_v1'&&key!=='movp_clone_store_v1')throw Error('Clave de perfil inválida');
+    return window.bridge.profileRead(localStorage.getItem(key)||localStorage.getItem('movp_clone_store_v1'));
+  },
+  write: (key, value) => {
+    if(key!=='nebula_store_v1'&&key!=='movp_clone_store_v1')throw Error('Clave de perfil inválida');
+    window.bridge.profileWrite(value);
+  },
+}),...(isMacDesktop?{isMac:true}:{})});
+// Roboto del sistema Nébula (canvas «Nébula · pantallas»), solo en escritorio: Android, iOS y Tizen no cargan este archivo.
+{const font=document.createElement('link');font.rel='stylesheet';font.href='roboto.css';document.head.appendChild(font);}
+if(isMacDesktop){
+  const markMac=()=>document.body?.classList.add('platform-mac');
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',markMac);else markMac();
+}
+window.addEventListener('error',event=>{
+  if(String(event.message).includes('[PROFILE]')){
+    const show=()=>{document.getElementById('bootSplash')?.remove();document.getElementById('content').textContent='No se pudo abrir o guardar el perfil. Tus archivos anteriores se conservaron. Cierra Nébula y revisa el espacio disponible antes de reintentar.';};
+    if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',show);else show();
+  }
+});
