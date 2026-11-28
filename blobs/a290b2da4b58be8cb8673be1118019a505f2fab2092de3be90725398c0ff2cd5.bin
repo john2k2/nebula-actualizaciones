@@ -1,0 +1,70 @@
+'use strict';
+
+// Format observed in ActivityVideo.qualitys (REA): label, size, link.
+const CatalogSources = (() => {
+  const identity=typeof MediaIdentity!=='undefined'?MediaIdentity:require('./core/media-identity.js');
+  const availability=typeof SourceAvailability!=='undefined'?SourceAvailability:require('./core/source-availability.js');
+  const catalogService=typeof SourceCatalog!=='undefined'?SourceCatalog:require('./core/catalog-service.js');
+  function parse(urls, resolutions = '') {
+    const labels = Array.isArray(resolutions) ? resolutions : String(resolutions).split(/[|,;/]+/).map(s => s.trim()).filter(Boolean);
+    return (Array.isArray(urls) ? urls : []).map((entry, i) => {
+      const object = entry && typeof entry === 'object' ? entry : {};
+      const parts = typeof entry === 'string' ? entry.split(',_,') : [];
+      const encoded = parts.length >= 3;
+      const link = String(encoded ? parts.slice(2).join(',_,') : (typeof entry === 'string' ? entry : object.url || object.link || '')).trim();
+      let url = '';
+      try {
+        const parsed = new URL(link);
+        if (['http:', 'https:', 'nebula-source:', 'movieplus-source:', 'nebula:'].includes(parsed.protocol)) url = parsed.href;
+        // Torrents: el enlace magnet se reproduce con el motor de la app (escritorio y Android).
+        else if (parsed.protocol === 'magnet:' && /[?&]xt=urn:btih:([a-f0-9]{40}|[a-z2-7]{32})(&|$)/i.test(link)) url = link;
+      } catch {}
+      // Formato de los complementos de Stremio: { infoHash, fileIdx } en vez de un enlace.
+      if (!url && /^[a-f0-9]{40}$/i.test(String(object.infoHash || ''))) {
+        const fileIdx = Number.isInteger(Number(object.fileIdx)) && object.fileIdx !== null && object.fileIdx !== '' ? `&fileIdx=${Number(object.fileIdx)}` : '';
+        const trackers = (Array.isArray(object.sources) ? object.sources : [])
+          .map((value) => String(value)).filter((value) => /^tracker:(udp|https?|wss?):\/\//i.test(value))
+          .slice(0, 12).map((value) => '&tr=' + encodeURIComponent(value.slice(8))).join('');
+        url = `magnet:?xt=urn:btih:${String(object.infoHash).toLowerCase()}${fileIdx}${trackers}`;
+      }
+      return {
+        name: String(encoded ? parts[0] : object.name || object.quality || labels[i] || `Fuente ${i + 1}`),
+        size: String(encoded ? parts[1] : object.size || ''),
+        url,
+        unavailableReason: url ? '' : 'Enlace cifrado o inválido: pendiente de resolver',
+      };
+    });
+  }
+  /**
+   * Salud de una fuente torrent: personas que comparten frente a la velocidad que exige el archivo
+   * (tamaño ÷ duración). Medido en un celular con 10 películas 4K: con 66-125 personas por cada MB/s
+   * necesario no hubo cortes; con 7-25 (4K de 8-9 GB compartidos por pocos) cortaba seguido.
+   * Sin datos de personas no se castiga.
+   */
+  function torrentHealth(source, runtimeMinutes = 0) {
+    const text = String(source?.size || '');
+    let seeders = Number(source?.seeders);
+    if (!(seeders >= 0)) { const match = /(\d+)\s*personas?/i.exec(text); seeders = match ? Number(match[1]) : -1; }
+    const sizeMatch = /(\d+(?:[.,]\d+)?)\s*(TB|GB|MB)\b/i.exec(text);
+    const sizeMB = sizeMatch ? Number(sizeMatch[1].replace(',', '.')) * ({ TB: 1048576, GB: 1024, MB: 1 })[sizeMatch[2].toUpperCase()] : 0;
+    const minutes = Number(runtimeMinutes) > 0 ? Number(runtimeMinutes) : 100;
+    const needMBps = sizeMB > 0 ? sizeMB / (minutes * 60) : 0;
+    const perNeed = seeders >= 0 && needMBps > 0 ? seeders / needMBps : -1;
+    // Una fuente de otro año (pack mal asociado por Torrentio) nunca cuenta como sana y va última entre las débiles.
+    if (source?.yearMismatch) return { seeders, sizeMB, needMBps, perNeed: -1, healthy: false };
+    const healthy = seeders < 0 || (seeders >= 20 && (needMBps <= 0 || perNeed >= 30));
+    return { seeders, sizeMB, needMBps, perNeed, healthy };
+  }
+  const topQualities = catalogService.topQualities;
+  const sourceRank = catalogService.sourceRank;
+  function availabilityLabel(item, inCatalog = false) {
+    if (item.kind === 'nebula') return 'Nébula · Ver fuentes';
+    if (item.type === 'tv') return inCatalog || item.kind === 'catalog' ? 'Fuentes por capítulo' : 'Consultar capítulos';
+    return item.source || item.kind === 'jellyfin' ? 'Original' : 'Consultar fuentes';
+  }
+  function isTestCatalog(url) {
+    try {const parsed=new URL(url);return parsed.protocol==='http:' && ['127.0.0.1','localhost'].includes(parsed.hostname) && parsed.port==='18765' && parsed.pathname==='/catalog.json';}catch{return false;}
+  }
+  return { parse, topQualities, sourceRank, torrentHealth, availabilityLabel, identity, availability, isTestCatalog, catalogService };
+})();
+if (typeof module !== 'undefined') module.exports = CatalogSources;
