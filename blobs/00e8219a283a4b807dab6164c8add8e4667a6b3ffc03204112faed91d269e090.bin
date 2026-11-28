@@ -1,0 +1,184 @@
+'use strict';
+
+// Format observed in ActivityVideo.qualitys (REA): label, size, link.
+const CatalogSources = (() => {
+  const identity=typeof MediaIdentity!=='undefined'?MediaIdentity:require('./core/media-identity.js');
+  const availability=typeof SourceAvailability!=='undefined'?SourceAvailability:require('./core/source-availability.js');
+  const catalogService=typeof SourceCatalog!=='undefined'?SourceCatalog:require('./core/catalog-service.js');
+  // Trackers públicos de la lista trackers_best (ngosang) que respondieron al saludo BEP 15 el 2026-11-28. El servidor
+  // puede mandar otra lista en /api/config/torrentio (setTrackers) para cambiarla sin actualizar la app.
+  const DEFAULT_TRACKERS = [
+    'udp://tracker.opentrackr.org:1337/announce', 'udp://open.stealth.si:80/announce', 'udp://tracker.torrent.eu.org:451/announce',
+    'udp://open.tracker.cl:1337/announce', 'udp://open.demonii.com:1337/announce', 'udp://explodie.org:6969/announce',
+    'udp://tracker.qu.ax:6969/announce', 'udp://tracker-udp.gbitt.info:80/announce', 'udp://tracker.bittor.pw:1337/announce',
+    'udp://tracker.corpscorp.online:80/announce', 'udp://tracker.ducks.party:1984/announce', 'udp://tracker.nyaa.vc:6969/announce',
+  ];
+  let publicTrackers = DEFAULT_TRACKERS;
+  function setTrackers(list) {
+    const valid = (Array.isArray(list) ? list : []).map(String).filter(value => /^(?:udp|https?|wss?):\/\/[^\s"<>]{3,200}$/i.test(value)).slice(0, 30);
+    publicTrackers = valid.length ? [...new Set(valid)] : DEFAULT_TRACKERS;
+    return publicTrackers;
+  }
+  function parse(urls, resolutions = '') {
+    const labels = Array.isArray(resolutions) ? resolutions : String(resolutions).split(/[|,;/]+/).map(s => s.trim()).filter(Boolean);
+    return (Array.isArray(urls) ? urls : []).map((entry, i) => {
+      const object = entry && typeof entry === 'object' ? entry : {};
+      const parts = typeof entry === 'string' ? entry.split(',_,') : [];
+      const encoded = parts.length >= 3;
+      const link = String(encoded ? parts.slice(2).join(',_,') : (typeof entry === 'string' ? entry : object.url || object.link || '')).trim();
+      let url = '';
+      try {
+        const parsed = new URL(link);
+        if (['http:', 'https:', 'nebula-source:', 'movieplus-source:', 'nebula:'].includes(parsed.protocol)) url = parsed.href;
+        // Torrents: el enlace magnet se reproduce con el motor de la app (escritorio y Android).
+        else if (parsed.protocol === 'magnet:' && /[?&]xt=urn:btih:([a-f0-9]{40}|[a-z2-7]{32})(&|$)/i.test(link)) url = link;
+      } catch {}
+      // Formato de los complementos de Stremio: { infoHash, fileIdx } en vez de un enlace.
+      if (!url && /^[a-f0-9]{40}$/i.test(String(object.infoHash || ''))) {
+        const fileIdx = Number.isInteger(Number(object.fileIdx)) && object.fileIdx !== null && object.fileIdx !== '' ? `&fileIdx=${Number(object.fileIdx)}` : '';
+        const own = (Array.isArray(object.sources) ? object.sources : [])
+          .map((value) => String(value)).filter((value) => /^tracker:(udp|https?|wss?):\/\//i.test(value)).slice(0, 12).map((value) => value.slice(8));
+        // Torrentio casi nunca manda trackers (medido: 32 de 333 fuentes): se suman los públicos que responden.
+        const trackers = [...new Set([...own, ...publicTrackers])].slice(0, 20).map((value) => '&tr=' + encodeURIComponent(value)).join('');
+        url = `magnet:?xt=urn:btih:${String(object.infoHash).toLowerCase()}${fileIdx}${trackers}`;
+      }
+      return {
+        name: String(encoded ? parts[0] : object.name || object.quality || labels[i] || `Fuente ${i + 1}`),
+        size: String(encoded ? parts[1] : object.size || ''),
+        url,
+        unavailableReason: url ? '' : 'Enlace cifrado o inválido: pendiente de resolver',
+      };
+    });
+  }
+  /**
+   * Salud de una fuente torrent: personas que comparten frente a la velocidad que exige el archivo
+   * (tamaño ÷ duración). Medido en un celular con 10 películas 4K: con 66-125 personas por cada MB/s
+   * necesario no hubo cortes; con 7-25 (4K de 8-9 GB compartidos por pocos) cortaba seguido.
+   * Sin datos de personas no se castiga.
+   */
+  function torrentHealth(source, runtimeMinutes = 0) {
+    const text = String(source?.size || '');
+    let seeders = Number(source?.seeders);
+    if (!(seeders >= 0)) { const match = /(\d+)\s*personas?/i.exec(text); seeders = match ? Number(match[1]) : -1; }
+    const sizeMatch = /(\d+(?:[.,]\d+)?)\s*(TB|GB|MB)\b/i.exec(text);
+    const sizeMB = sizeMatch ? Number(sizeMatch[1].replace(',', '.')) * ({ TB: 1048576, GB: 1024, MB: 1 })[sizeMatch[2].toUpperCase()] : 0;
+    const minutes = Number(runtimeMinutes) > 0 ? Number(runtimeMinutes) : 100;
+    const needMBps = sizeMB > 0 ? sizeMB / (minutes * 60) : 0;
+    const perNeed = seeders >= 0 && needMBps > 0 ? seeders / needMBps : -1;
+    // Una fuente de otro año (pack mal asociado por Torrentio) nunca cuenta como sana y va última entre las débiles.
+    if (source?.yearMismatch) return { seeders, sizeMB, needMBps, perNeed: -1, healthy: false };
+    const healthy = seeders < 0 || (seeders >= 20 && (needMBps <= 0 || perNeed >= 30));
+    return { seeders, sizeMB, needMBps, perNeed, healthy };
+  }
+  // «Multi Subs» son subtítulos, no audio: MULTI cuenta solo si no le sigue SUB/SUBS/SUBTITLE.
+  const TORRENTIO_LANGS=[[/\b(?:LAT|LATINO|LATAM)\b/i,'LAT'],[/\b(?:CAST|CASTELLANO)\b/i,'CAST'],[/\b(?:ESP|SPA|ESPA[ÑN]OL|SPANISH)\b/i,'ESP'],[/\bDUAL\b/i,'DUAL'],[/\b(?:ENG|ENGLISH|INGL[EÉ]S)\b/i,'ENG'],[/\b(?:JAP|JPN|JAPANESE)\b/i,'JAPONÉS'],[/\b(?:SUB|SUBS|VOSE|SUBTITULADO)\b/i,'SUB'],[/\bMULTI\d*\b(?![\s-]*(?:SUBS?|SUBTITLES?)\b)/i,'MULTI']];
+  // Packs de anime como los de Erai-raws: «[Multiple Subtitle] [ENG][POR-BR][SPA-LA][SPA]…» y Torrentio pone las banderas
+  // de esos subtítulos. Sin ninguna marca de audio (Dual/Multi Audio/Dubbed ni «Latino»/«Castellano» escritos), los
+  // idiomas son de subtítulos: el español pasa a «Subtítulos en español» y no se presenta como audio.
+  const SUBTITLE_LIST=/\bmulti(?:ple)?[\s-]*sub(?:s|titles?)?\b|\bmultisubs?\b|\bVOSTFR\b/i;
+  const AUDIO_MARK=/\b(?:dual|multi)[\s-]*(?:audio|dub)\b|\bdubbed\b|\bdual\b|\bLATINO\b|\bCASTELLANO\b|\bdual[\s-]*lat\b/i;
+  const SPANISH_SUBS=/\bVOSE\b|\bsub(?:s|titulad[oa]s?|titles?)?[\s._-]*(?:en[\s._-]*)?(?:espa[ñn]ol|spanish|spa|esp)\b/i;
+  // Torrentio agrega al final una línea de banderas con los idiomas que detectó («🇬🇧 / 🇪🇸 / 🇲🇽»): 🇪🇸 es su «spanish»
+  // y 🇲🇽 su «latino». No dice si es audio o subtítulo; las palabras del archivo (SUBS, VOSE) sí.
+  const TORRENTIO_FLAGS={'🇲🇽':'LAT','🇦🇷':'LAT','🇨🇴':'LAT','🇨🇱':'LAT','🇵🇪':'LAT','🇻🇪':'LAT','🇪🇸':'ESP','🇬🇧':'ENG','🇺🇸':'ENG','🇫🇷':'FRANCÉS','🇮🇹':'ITALIANO','🇩🇪':'ALEMÁN','🇵🇹':'PORTUGUÉS','🇧🇷':'PORTUGUÉS','🇯🇵':'JAPONÉS','🇰🇷':'COREANO'};
+  // Orden en el nombre: español primero, después dual/multi e inglés, otros idiomas (como mucho 2) y subtítulos al final.
+  const TORRENTIO_LANG_ORDER=['LAT','CAST','ESP','DUAL','MULTI','ENG','FRANCÉS','ITALIANO','ALEMÁN','PORTUGUÉS','JAPONÉS','COREANO','SUBES','SUB'];
+  function torrentioLanguages(text){
+    const found=new Set();
+    const raw=String(text||'');
+    const normalized=raw.replace(/[._|/()[\],·•]+/g,' ');
+    for(const [pattern,label] of TORRENTIO_LANGS)if(pattern.test(normalized))found.add(label);
+    for(const flag of raw.match(/[\u{1F1E6}-\u{1F1FF}]{2}/gu)||[])if(TORRENTIO_FLAGS[flag])found.add(TORRENTIO_FLAGS[flag]);
+    const spanish=['LAT','CAST','ESP'].some(label=>found.has(label));
+    const spanishSubs=SPANISH_SUBS.test(normalized);
+    // Pack con lista de subtítulos y sin marca de audio: todos los idiomas son de subtítulos, no se afirma ningún audio.
+    if(SUBTITLE_LIST.test(normalized)&&!AUDIO_MARK.test(normalized))return [spanish||spanishSubs?'SUBES':'SUB'];
+    // «VOSE» o «Sub Español»: ese español es de subtítulos, salvo que el nombre también diga latino o castellano.
+    if(spanishSubs){
+      if(!/\b(?:LAT|LATINO|CAST|CASTELLANO)\b/i.test(normalized))['LAT','CAST','ESP'].forEach(label=>found.delete(label));
+      found.add('SUBES');
+    }
+    // «Subtítulos en español» ya dice que hay subtítulos.
+    if(found.has('SUBES'))found.delete('SUB');
+    // «Español» a secas sobra si ya se sabe cuál (latino o de España).
+    if(found.has('ESP')&&(found.has('LAT')||found.has('CAST')))found.delete('ESP');
+    const ordered=TORRENTIO_LANG_ORDER.filter(label=>found.has(label));
+    let others=0;
+    return ordered.filter(label=>!['FRANCÉS','ITALIANO','ALEMÁN','PORTUGUÉS','JAPONÉS','COREANO'].includes(label)||++others<=2);
+  }
+  // Torrentio a veces asocia un pack de otra película de la saga («Kung Fu Panda 4» → «Collection 2008-2016» o
+  // «Panda2BD1080.mkv»). Si el nombre menciona años (de 1900 al que viene), es de otra cuando ninguno es el de la película
+  // ±1. Si no menciona ninguno, vale solo si trae el título: muchas fuentes en español no ponen el año
+  // («Blade.Runner.2049.(Spanish.English.Subs)»; 2049 no es un año posible).
+  const plain = value => ` ${String(value || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()} `;
+  function yearMismatch(text, year, titles = [], thisYear = new Date().getFullYear()) {
+    if (!(year > 1900)) return false;
+    const years = (String(text || '').match(/(?<![\d×x])(?:19|20)\d{2}(?![\d×x])/gi) || []).map(Number).filter(y => y <= thisYear + 1);
+    if (years.length) return !years.some(y => Math.abs(y - year) <= 1);
+    const haystack = plain(text);
+    return !(titles || []).some(title => plain(title).trim().length >= 3 && haystack.includes(plain(title)));
+  }
+  /**
+   * Torrentio numera los episodios como IMDb (Cinemeta) y la app los recibe numerados como TMDB. En anime no coinciden
+   * (medido: 8 de 11 populares). One Piece en TMDB numera absoluto dentro de cada temporada (T2 = 62…77) e IMDb tiene T1 de
+   * 8; en Naruto TMDB T2E1 es el episodio 53 e IMDb T2E1 el 36. Se traduce por fecha de emisión (exacta al día en lo
+   * medido) y, sin fecha, por número absoluto; el absoluto solo se corre con los años (One Piece 1122: +174 días).
+   * target: {season, episode, airDate, sameDayIndex, absolute}; videos: [{season, episode, released}] de Cinemeta.
+   */
+  function mapEpisode(target, videos) {
+    const original = { season: Number(target?.season), episode: Number(target?.episode), how: 'igual' };
+    const list = (videos || []).filter(v => v.season > 0 && v.episode > 0).sort((a, b) => a.season - b.season || a.episode - b.episode);
+    if (!list.length) return original;
+    const day = value => { const time = Date.parse(String(value || '').slice(0, 10)); return Number.isFinite(time) ? time / 864e5 : NaN; };
+    const air = day(target?.airDate);
+    const same = list.find(v => v.season === original.season && v.episode === original.episode);
+    // El mismo número en los dos y la misma fecha (±3 días, o sin fecha para comparar): no hay nada que traducir.
+    if (same && (!Number.isFinite(air) || !Number.isFinite(day(same.released)) || Math.abs(day(same.released) - air) <= 3)) return original;
+    if (Number.isFinite(air)) {
+      for (const tolerance of [1, 3]) {
+        const near = list.filter(v => Math.abs(day(v.released) - air) <= tolerance);
+        if (near.length) {
+          // Dos episodios el mismo día (estrenos dobles): el mismo orden que en TMDB.
+          const pick = near[Math.min(Number(target?.sameDayIndex) || 0, near.length - 1)];
+          return { season: pick.season, episode: pick.episode, how: 'fecha' };
+        }
+      }
+    }
+    const absolute = Number(target?.absolute);
+    if (absolute > 0 && absolute <= list.length) return { season: list[absolute - 1].season, episode: list[absolute - 1].episode, how: 'absoluto' };
+    return original;
+  }
+  /**
+   * Peerflix (complemento de Stremio con DonTorrent, MejorTorrent, Wolfmax4k, PelisPanda…) trae muchas más fuentes en
+   * español que Torrentio, pero casi todas con pocas personas (medido en 7 títulos: 7-36 nuevas en español, 0-3 con 20+
+   * personas). Solo se suman esas pocas sanas: en español, con 20+ personas, hasta 10 GB, sin 3D, que no estén ya en
+   * Torrentio; como mucho 5.
+   */
+  function peerflixExtras(peerflix, torrentio, { maxBytes = 10 * 1024 ** 3, limit = 5 } = {}) {
+    const known = new Set((torrentio || []).map(stream => String(stream?.infoHash || '').toLowerCase()).filter(Boolean));
+    const sizeOf = text => { const m = /(\d+(?:[.,]\d+)?)\s*(TB|GB|MB)\b/i.exec(text); return m ? Number(m[1].replace(',', '.')) * ({ TB: 1024 ** 4, GB: 1024 ** 3, MB: 1024 ** 2 })[m[2].toUpperCase()] : 0; };
+    return (peerflix || []).filter(stream => {
+      const hash = String(stream?.infoHash || '').toLowerCase();
+      const text = `${stream?.name || ''}\n${stream?.title || stream?.description || ''}`;
+      const seeders = Number((/👤\s*(\d+)/.exec(text) || [])[1] ?? -1);
+      const languages = torrentioLanguages(text);
+      // REMUX pesa 20-40 GB aunque no diga el tamaño: Torrentio ya los excluye en su configuración (brremux).
+      if (!/^[a-f0-9]{40}$/.test(hash) || known.has(hash) || seeders < 20 || /\b(?:3D|REMUX)\b/i.test(text) || sizeOf(text) > maxBytes) return false;
+      if (!languages.some(code => code === 'LAT' || code === 'CAST' || code === 'ESP')) return false;
+      known.add(hash);
+      return true;
+    }).sort((a, b) => Number((/👤\s*(\d+)/.exec(b.title || b.description || '') || [])[1] || 0) - Number((/👤\s*(\d+)/.exec(a.title || a.description || '') || [])[1] || 0)).slice(0, limit);
+  }
+  const topQualities = catalogService.topQualities;
+  const sourceRank = catalogService.sourceRank;
+  function availabilityLabel(item, inCatalog = false) {
+    if (item.kind === 'nebula') return 'Nébula · Ver fuentes';
+    if (item.type === 'tv') return inCatalog || item.kind === 'catalog' ? 'Fuentes por capítulo' : 'Consultar capítulos';
+    return item.source || item.kind === 'jellyfin' ? 'Original' : 'Consultar fuentes';
+  }
+  function isTestCatalog(url) {
+    try {const parsed=new URL(url);return parsed.protocol==='http:' && ['127.0.0.1','localhost'].includes(parsed.hostname) && parsed.port==='18765' && parsed.pathname==='/catalog.json';}catch{return false;}
+  }
+  return { parse, setTrackers, topQualities, sourceRank, torrentHealth, torrentioLanguages, yearMismatch, mapEpisode, peerflixExtras, availabilityLabel, identity, availability, isTestCatalog, catalogService };
+})();
+if (typeof module !== 'undefined') module.exports = CatalogSources;
